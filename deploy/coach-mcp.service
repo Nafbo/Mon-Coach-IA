@@ -1,0 +1,29 @@
+[Unit]
+Description=Serveur MCP Coach Triathlon Garmin
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adapter ces deux chemins à l'installation réelle sur la VM (cf. guide d'hébergement).
+User=coach-mcp
+WorkingDirectory=/opt/mcp-garmin-coach
+EnvironmentFile=/opt/mcp-garmin-coach/.env
+# Toutes les dates/heures manipulées par le serveur doivent être en Europe/Paris (spec section 5bis),
+# indépendamment du fuseau par défaut de la VM (généralement UTC).
+Environment=TZ=Europe/Paris
+# --no-access-log : le log d'accès par défaut d'uvicorn loggue le chemin complet de la requête,
+# qui contient le segment secret (cf. spec section 5). Le logging HTTP applicatif (méthode +
+# code retour, sans le chemin) est assuré par AccessLogMiddleware dans src/auth.py.
+ExecStart=/opt/mcp-garmin-coach/.venv/bin/python -m uvicorn src.server:app --host 127.0.0.1 --port ${PORT} --no-access-log
+Restart=on-failure
+RestartSec=5
+
+# Durcissement basique.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/mcp-garmin-coach/data
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+.env
+.mcp.json
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+data/
+*.db
+*.db-journal
+*.egg-info/
+build/
+dist/
+.mypy_cache/
+.ruff_cache/
+.DS_Store

@@ -1,0 +1,22 @@
+# Exemple de configuration Caddy pour exposer le serveur MCP en HTTPS.
+# La configuration réelle vit sur la VM (cf. guide d'hébergement séparé) ; ce fichier n'est
+# qu'une référence à adapter (nom de domaine notamment).
+#
+# Le serveur Python n'écoute qu'en HTTP simple sur 127.0.0.1:8080 (cf. .env : PORT=8080) ;
+# Caddy gère la terminaison TLS et le reverse proxy.
+#
+# Le segment secret fait partie du chemin de la requête (/mcp/<secret>) : Caddy n'a rien de
+# spécifique à faire pour l'auth, il ne fait que relayer telle quelle la requête au serveur
+# Python, qui répond 404 si le secret est incorrect.
+
+coach.example.com {
+    reverse_proxy 127.0.0.1:8080
+
+    # Caddy loggue par défaut la méthode, le chemin et le code retour de chaque requête.
+    # Le chemin contenant le segment secret, désactiver ou anonymiser ce log si nécessaire
+    # (cf. spec section 5 : le secret ne doit jamais apparaître dans les logs).
+    log {
+        output file /var/log/caddy/coach-mcp.log
+        format json
+    }
+}
