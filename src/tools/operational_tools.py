@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any, Callable
 
-from src.models import PARIS_TZ, DayPlanInput, SessionInput, monday_of_week, today_paris
+from src.models import DayPlanInput, SessionInput, monday_of_week, now_paris, today_paris
 
 
 def _now_iso() -> str:
-    return datetime.now(PARIS_TZ).isoformat()
+    return now_paris().isoformat()
 
 
 def _parse_date(date_str: str) -> date:

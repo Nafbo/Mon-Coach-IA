@@ -79,10 +79,18 @@ Connect (via `garmin_sync`) doit être vérifiée manuellement une fois le serve
 
 ## Fuseau horaire
 
-Toutes les dates métier (`today`, `week_start_date`, dates par défaut des tools) sont calculées
-en **Europe/Paris**, indépendamment du fuseau du serveur. En production, fixer aussi
-`TZ=Europe/Paris` au niveau du service systemd (déjà fait dans `deploy/coach-mcp.service`) pour
-que les logs et l'horloge système soient cohérents.
+Toutes les dates/heures générées côté serveur — dates métier (`today`, `week_start_date`,
+dates par défaut des tools) **et** timestamps (`synced_at` de `garmin_sync`, `created_at` de
+`sessions`/`activity_feedback`, `fetched_at` de `garmin_cache`) — sont en **Europe/Paris**,
+indépendamment du fuseau du serveur (spec section 5bis). Point d'entrée unique :
+`now_paris()` / `today_paris()` dans `src/models.py` — aucun `datetime.now()` naïf ni
+`datetime.now(timezone.utc)` ailleurs dans le code. Seules les dates fournies en entrée par
+l'utilisateur (paramètre `date` des tools) restent au format `YYYY-MM-DD` tel quel, sans
+conversion.
+
+En production, fixer aussi `TZ=Europe/Paris` au niveau du service systemd (déjà fait dans
+`deploy/coach-mcp.service`) pour que les logs et l'horloge système soient cohérents avec le
+code applicatif.
 
 ## Déploiement
 
@@ -93,7 +101,7 @@ d'hébergement séparé.
 **`PUBLIC_DOMAIN` est requis en production.** Le SDK `mcp` protège par défaut les endpoints
 Streamable HTTP contre le DNS rebinding en validant les en-têtes `Host`/`Origin` des requêtes,
 et n'autorise que `localhost`/`127.0.0.1` si aucun domaine n'est configuré explicitement
-(`src/server.py:build_transport_security`). Une fois déployé derrière Caddy sur un vrai domaine,
+(`src/auth.py:build_transport_security`). Une fois déployé derrière Caddy sur un vrai domaine,
 sans `PUBLIC_DOMAIN` renseigné dans `.env`, toute requête légitime reçoit **421 "Invalid Host
 header"**. Renseigner `PUBLIC_DOMAIN=coach-ia.duckdns.org` (sans `https://` ni port) dans le
 `.env` de la VM résout le problème ; `localhost`/`127.0.0.1` restent autorisés en parallèle, donc
@@ -101,9 +109,13 @@ les tests en local continuent de fonctionner sans configurer cette variable.
 
 ## Écarts volontaires par rapport à la spec initiale
 
-À la demande de l'utilisateur, deux tools s'écartent du schéma exact de
+À la demande de l'utilisateur, plusieurs tools s'écartent du schéma exact de
 `mcp-garmin-coach-spec.md` (section 7), validés en conditions réelles :
 
+- **`garmin_sync`** (7.1) : `synced_at` est en **Europe/Paris**, pas en UTC comme indiqué
+  littéralement dans la spec (`"synced_at": "<ISO8601 UTC>"`) — corrigé pour respecter la
+  contrainte plus générale de la section 5bis (tout timestamp généré côté serveur en
+  Europe/Paris), qui prime sur la mention UTC de 7.1.
 - **`garmin_get_recent_activities`** (7.7) : chaque activité expose des champs
   supplémentaires en plus du schéma d'origine.
   - Général : `garmin_type` (type brut Garmin, ex. `trail_running` vs `running`),

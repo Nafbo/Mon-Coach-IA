@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
 from src.garmin_client import GarminAuthenticationError, GarminClient, GarminUnavailableError
-from src.models import monday_of_week, today_paris
+from src.models import monday_of_week, now_paris, today_paris
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ def _get_cached(conn: sqlite3.Connection, type_: str, date_key: str) -> dict[str
     if row is None:
         return None
     fetched_at = datetime.fromisoformat(row["fetched_at"])
-    if datetime.now(timezone.utc) - fetched_at > CACHE_FRESHNESS:
+    if now_paris() - fetched_at > CACHE_FRESHNESS:
         return None
     return json.loads(row["payload_json"])
 
@@ -33,7 +33,7 @@ def _get_cached(conn: sqlite3.Connection, type_: str, date_key: str) -> dict[str
 def _store_cache(conn: sqlite3.Connection, type_: str, date_key: str, payload: dict[str, Any]) -> None:
     conn.execute(
         "INSERT INTO garmin_cache (date, type, payload_json, fetched_at) VALUES (?, ?, ?, ?)",
-        (date_key, type_, json.dumps(payload), datetime.now(timezone.utc).isoformat()),
+        (date_key, type_, json.dumps(payload), now_paris().isoformat()),
     )
     conn.commit()
 
@@ -79,7 +79,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         for type_, payload in payloads.items():
             _store_cache(conn, type_, date_keys[type_], payload)
 
-        synced_at = datetime.now(timezone.utc).isoformat()
+        synced_at = now_paris().isoformat()
         return {"status": "ok", "synced_at": synced_at}
 
     async def garmin_get_training_status() -> dict[str, Any]:

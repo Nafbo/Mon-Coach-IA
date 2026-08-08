@@ -11,9 +11,19 @@ from pydantic import BaseModel, Field
 PARIS_TZ = ZoneInfo("Europe/Paris")
 
 
+def now_paris() -> datetime:
+    """Horodatage courant, timezone-aware, en Europe/Paris (cf. spec section 5bis).
+
+    Point d'entrée unique pour toute date/heure générée côté serveur (created_at,
+    fetched_at, synced_at, dates "aujourd'hui" par défaut...) — ne jamais appeler
+    `datetime.now()` (naïf) ou `datetime.now(timezone.utc)` ailleurs dans le code.
+    """
+    return datetime.now(PARIS_TZ)
+
+
 def today_paris() -> date:
     """Date du jour en Europe/Paris, indépendamment du fuseau du serveur (cf. spec section 5bis)."""
-    return datetime.now(PARIS_TZ).date()
+    return now_paris().date()
 
 
 def monday_of_week(d: date) -> date:

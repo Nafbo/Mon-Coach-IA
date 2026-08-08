@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -15,6 +15,7 @@ from garminconnect import (
 
 from src.db import get_connection, init_db
 from src.garmin_client import GarminAuthenticationError, GarminClient, GarminUnavailableError
+from src.models import PARIS_TZ
 from src.tools import garmin_tools as gt
 
 # ---------------------------------------------------------------------------
@@ -22,6 +23,16 @@ from src.tools import garmin_tools as gt
 # Le GarminClient est ici un double de test (spec'd sur la vraie classe) : garminconnect
 # n'est jamais sollicité.
 # ---------------------------------------------------------------------------
+
+
+def _assert_paris_offset(iso_timestamp: str) -> None:
+    """Vérifie qu'un timestamp ISO généré côté serveur est bien en Europe/Paris (+01:00
+    l'hiver ou +02:00 l'été), jamais en UTC (+00:00) ni naïf (spec section 5bis)."""
+    parsed = datetime.fromisoformat(iso_timestamp)
+    assert parsed.tzinfo is not None, f"timestamp naïf inattendu : {iso_timestamp}"
+    assert parsed.utcoffset() in (timedelta(hours=1), timedelta(hours=2)), (
+        f"offset non-Paris inattendu : {iso_timestamp}"
+    )
 
 
 @pytest.fixture
@@ -49,6 +60,24 @@ def frozen_today(monkeypatch: pytest.MonkeyPatch) -> date:
     return fixed
 
 
+async def test_cache_write_uses_paris_timezone(
+    tools: dict, fake_client: MagicMock, conn: sqlite3.Connection
+) -> None:
+    fake_client.get_training_status.return_value = {
+        "date": "2026-08-05",
+        "status": "PRODUCTIVE",
+        "acute_load": 450,
+        "chronic_load": 400,
+    }
+
+    await tools["garmin_get_training_status"]()
+
+    row = conn.execute(
+        "SELECT fetched_at FROM garmin_cache WHERE type = 'training_status'"
+    ).fetchone()
+    _assert_paris_offset(row["fetched_at"])
+
+
 async def test_training_status_fetches_then_uses_cache(tools: dict, fake_client: MagicMock) -> None:
     fake_client.get_training_status.return_value = {
         "date": "2026-08-05",
@@ -73,7 +102,7 @@ async def test_cache_expired_triggers_refetch(tools: dict, fake_client: MagicMoc
         "chronic_load": 120,
     }
 
-    stale_time = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    stale_time = (datetime.now(PARIS_TZ) - timedelta(hours=2)).isoformat()
     conn.execute(
         "INSERT INTO garmin_cache (date, type, payload_json, fetched_at) VALUES (?, ?, ?, ?)",
         ("2026-08-05", "training_status", '{"status": "OLD", "acute_load": 1, "chronic_load": 1}', stale_time),
@@ -91,7 +120,7 @@ async def test_garmin_sync_forces_real_call_even_with_fresh_cache(
 ) -> None:
     conn.execute(
         "INSERT INTO garmin_cache (date, type, payload_json, fetched_at) VALUES (?, ?, ?, ?)",
-        ("2026-08-05", "training_status", '{"status": "CACHED"}', datetime.now(timezone.utc).isoformat()),
+        ("2026-08-05", "training_status", '{"status": "CACHED"}', datetime.now(PARIS_TZ).isoformat()),
     )
     conn.commit()
 
@@ -137,9 +166,10 @@ async def test_garmin_sync_forces_real_call_even_with_fresh_cache(
 
     assert result["status"] == "ok"
     assert "synced_at" in result
+    _assert_paris_offset(result["synced_at"])
     fake_client.sync_all.assert_called_once()
 
-    rows = conn.execute("SELECT type, date FROM garmin_cache ORDER BY id").fetchall()
+    rows = conn.execute("SELECT type, date, fetched_at FROM garmin_cache ORDER BY id").fetchall()
     types = {row["type"] for row in rows}
     assert types == {
         "training_status",
@@ -153,6 +183,9 @@ async def test_garmin_sync_forces_real_call_even_with_fresh_cache(
         "lactate_threshold",
         "intensity_minutes",
     }
+    # Toutes les lignes fraîchement écrites par garmin_sync (pas l'entrée "CACHED" pré-existante).
+    for row in rows:
+        _assert_paris_offset(row["fetched_at"])
 
 
 async def test_garmin_sync_error_returns_error_dict(tools: dict, fake_client: MagicMock) -> None:

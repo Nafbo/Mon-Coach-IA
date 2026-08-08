@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import pytest
 
 from src.db import get_connection, init_db
 from src.models import DayPlanInput, SessionInput
 from src.tools import operational_tools as ot
+
+
+def _assert_paris_offset(iso_timestamp: str) -> None:
+    """Vérifie qu'un timestamp ISO généré côté serveur est bien en Europe/Paris (+01:00
+    l'hiver ou +02:00 l'été), jamais en UTC (+00:00) ni naïf (spec section 5bis)."""
+    parsed = datetime.fromisoformat(iso_timestamp)
+    assert parsed.tzinfo is not None, f"timestamp naïf inattendu : {iso_timestamp}"
+    assert parsed.utcoffset() in (timedelta(hours=1), timedelta(hours=2)), (
+        f"offset non-Paris inattendu : {iso_timestamp}"
+    )
 
 
 @pytest.fixture
@@ -73,6 +83,15 @@ async def test_add_session_then_get_sessions(tools: dict) -> None:
     session = result["sessions"][0]
     assert session["discipline"] == "course"
     assert session["duree_minutes"] == 45
+
+
+async def test_add_session_created_at_uses_paris_timezone(tools: dict, conn: sqlite3.Connection) -> None:
+    await tools["add_session"](
+        date="2026-08-05", creneau="matin", discipline="course", objectif="a", description="a"
+    )
+
+    row = conn.execute("SELECT created_at FROM sessions WHERE date = ?", ("2026-08-05",)).fetchone()
+    _assert_paris_offset(row["created_at"])
 
 
 async def test_add_session_does_not_erase_existing_sessions(tools: dict) -> None:
@@ -188,6 +207,7 @@ async def test_log_activity_feedback_inserts_row(tools: dict, conn: sqlite3.Conn
     assert row["discipline"] == "course"
     assert row["ressenti"] == "😄"  # smiley stocké dans la colonne existante `ressenti`
     assert row["note"] == "8"  # note stockée en texte dans la colonne existante `note`
+    _assert_paris_offset(row["created_at"])
 
 
 async def test_log_activity_feedback_is_append_only(tools: dict, conn: sqlite3.Connection) -> None:
