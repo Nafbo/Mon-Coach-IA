@@ -8,7 +8,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from src.auth import SecretPathMiddleware, mcp_mount_path, redact_path
+from src.auth import SecretPathMiddleware, build_transport_security, mcp_mount_path, redact_path
 
 SECRET = "abc123def456"
 EXPECTED_PATH = f"/mcp/{SECRET}"
@@ -61,3 +61,29 @@ def test_redact_path_masks_secret() -> None:
 
 def test_redact_path_leaves_unrelated_path_untouched() -> None:
     assert redact_path("/health", SECRET) == "/health"
+
+
+# ---------------------------------------------------------------------------
+# Tests de build_transport_security : protection anti DNS-rebinding du SDK MCP,
+# doit autoriser le domaine public déployé derrière Caddy en plus de localhost.
+# ---------------------------------------------------------------------------
+
+
+def test_transport_security_without_domain_allows_only_localhost() -> None:
+    settings = build_transport_security(None)
+
+    assert settings.enable_dns_rebinding_protection is True
+    assert "127.0.0.1" in settings.allowed_hosts
+    assert "localhost:*" in settings.allowed_hosts
+    assert not any("coach-ia" in h for h in settings.allowed_hosts)
+
+
+def test_transport_security_with_domain_includes_public_domain() -> None:
+    settings = build_transport_security("coach-ia.duckdns.org")
+
+    assert "coach-ia.duckdns.org" in settings.allowed_hosts
+    assert "coach-ia.duckdns.org:*" in settings.allowed_hosts
+    assert "https://coach-ia.duckdns.org" in settings.allowed_origins
+    # localhost reste autorisé en parallèle, pour ne pas casser les tests locaux.
+    assert "127.0.0.1" in settings.allowed_hosts
+    assert "localhost:*" in settings.allowed_hosts

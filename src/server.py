@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from mcp.server.mcpserver import MCPServer
 from starlette.types import ASGIApp
 
-from src.auth import AccessLogMiddleware, SecretPathMiddleware, mcp_mount_path
+from src.auth import AccessLogMiddleware, SecretPathMiddleware, build_transport_security, mcp_mount_path
 from src.db import get_connection, init_db
 from src.garmin_client import GarminClient
 from src.tools.garmin_tools import build_garmin_tools
@@ -52,7 +52,13 @@ def _register_tool(mcp: MCPServer, name: str, func: Callable[..., Any]) -> None:
     mcp.tool(name=name)(wrapper)
 
 
-def build_app(*, conn: sqlite3.Connection, garmin_client: GarminClient, secret: str) -> ASGIApp:
+def build_app(
+    *,
+    conn: sqlite3.Connection,
+    garmin_client: GarminClient,
+    secret: str,
+    public_domain: str | None = None,
+) -> ASGIApp:
     """Construit l'app ASGI complète (MCP + auth par segment secret) à partir de dépendances déjà créées.
 
     Séparé de `create_app_from_env` pour rester testable sans variables d'environnement ni
@@ -68,7 +74,8 @@ def build_app(*, conn: sqlite3.Connection, garmin_client: GarminClient, secret: 
         _register_tool(mcp, name, func)
 
     mount_path = mcp_mount_path(secret)
-    inner_app = mcp.streamable_http_app(streamable_http_path=mount_path)
+    transport_security = build_transport_security(public_domain)
+    inner_app = mcp.streamable_http_app(streamable_http_path=mount_path, transport_security=transport_security)
     gated_app = SecretPathMiddleware(inner_app, expected_path=mount_path)
     return AccessLogMiddleware(gated_app)
 
@@ -81,6 +88,7 @@ def create_app_from_env() -> ASGIApp:
     secret = os.environ["MCP_SECRET_PATH"]
     db_path = os.environ.get("DB_PATH", "./data/coach.db")
     log_level = os.environ.get("LOG_LEVEL", "INFO")
+    public_domain = os.environ.get("PUBLIC_DOMAIN") or None
 
     configure_logging(log_level)
 
@@ -90,7 +98,7 @@ def create_app_from_env() -> ASGIApp:
     tokenstore_path = str(Path(db_path).resolve().parent / "garmin_tokens")
     garmin_client = GarminClient(email, password, tokenstore_path)
 
-    return build_app(conn=conn, garmin_client=garmin_client, secret=secret)
+    return build_app(conn=conn, garmin_client=garmin_client, secret=secret, public_domain=public_domain)
 
 
 app = create_app_from_env()

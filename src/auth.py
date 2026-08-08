@@ -5,12 +5,33 @@ from __future__ import annotations
 import hmac
 import logging
 
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 
 MCP_PATH_PREFIX = "/mcp"
+
+
+def build_transport_security(public_domain: str | None) -> TransportSecuritySettings:
+    """Autorise le Host/Origin du domaine public (déployé derrière Caddy) en plus de
+    localhost, pour la protection anti DNS-rebinding du SDK MCP.
+
+    Sans ça, le SDK n'autorise par défaut que localhost/127.0.0.1 : une fois derrière un
+    reverse proxy sur un vrai domaine, toute requête légitime reçoit un 421 "Invalid Host
+    header" (cf. mcp/server/transport_security.py).
+    """
+    allowed_hosts = ["127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*", "[::1]", "[::1]:*"]
+    allowed_origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+    if public_domain:
+        allowed_hosts += [public_domain, f"{public_domain}:*"]
+        allowed_origins += [f"https://{public_domain}", f"https://{public_domain}:*"]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
 
 
 def mcp_mount_path(secret: str) -> str:

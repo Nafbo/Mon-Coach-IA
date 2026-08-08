@@ -27,6 +27,7 @@ cp .env.example .env
 | `DB_PATH` | Chemin du fichier SQLite (défaut `./data/coach.db`) |
 | `LOG_LEVEL` | Niveau de log (défaut `INFO`) |
 | `PORT` | Port d'écoute HTTP local (défaut `8080`) |
+| `PUBLIC_DOMAIN` | Domaine public déployé derrière Caddy (ex. `coach-ia.duckdns.org`, sans schéma ni port). Optionnel en local ; **requis en production** (cf. ci-dessous) |
 
 Génération du secret :
 
@@ -88,6 +89,15 @@ que les logs et l'horloge système soient cohérents.
 Voir `deploy/coach-mcp.service` (unit systemd, chemins à adapter) et `deploy/Caddyfile.example`
 (reverse proxy HTTPS de référence). La configuration réelle de la VM est décrite dans le guide
 d'hébergement séparé.
+
+**`PUBLIC_DOMAIN` est requis en production.** Le SDK `mcp` protège par défaut les endpoints
+Streamable HTTP contre le DNS rebinding en validant les en-têtes `Host`/`Origin` des requêtes,
+et n'autorise que `localhost`/`127.0.0.1` si aucun domaine n'est configuré explicitement
+(`src/server.py:build_transport_security`). Une fois déployé derrière Caddy sur un vrai domaine,
+sans `PUBLIC_DOMAIN` renseigné dans `.env`, toute requête légitime reçoit **421 "Invalid Host
+header"**. Renseigner `PUBLIC_DOMAIN=coach-ia.duckdns.org` (sans `https://` ni port) dans le
+`.env` de la VM résout le problème ; `localhost`/`127.0.0.1` restent autorisés en parallèle, donc
+les tests en local continuent de fonctionner sans configurer cette variable.
 
 ## Écarts volontaires par rapport à la spec initiale
 
