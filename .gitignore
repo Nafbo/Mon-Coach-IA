@@ -1,5 +1,7 @@
 .env
 .mcp.json
+*.key
+*.pem
 .venv/
 venv/
 __pycache__/
