@@ -762,6 +762,321 @@ def test_get_vo2max_no_data_within_lookback_returns_nulls(client: GarminClient) 
     assert result == {"date": "2026-08-05", "running_vo2max": None, "cycling_vo2max": None}
 
 
+# ---------------------------------------------------------------------------
+# Tools garmin_get_activity_weather / garmin_get_activity_details : cache SANS expiration
+# (à la différence des autres tools garmin_get_*, cf. CACHE_FRESHNESS).
+# ---------------------------------------------------------------------------
+
+
+async def test_activity_weather_fetches_then_caches_without_expiry(tools: dict, fake_client: MagicMock) -> None:
+    fake_client.get_activity_weather.return_value = {"temp_celsius": 18.9, "condition": "Light Rain"}
+
+    first = await tools["garmin_get_activity_weather"]("24040147871")
+    second = await tools["garmin_get_activity_weather"]("24040147871")
+
+    assert first == {"temp_celsius": 18.9, "condition": "Light Rain"}
+    assert second == first
+    fake_client.get_activity_weather.assert_called_once_with("24040147871")
+
+
+async def test_activity_weather_cache_ignores_freshness_window(
+    tools: dict, fake_client: MagicMock, conn: sqlite3.Connection
+) -> None:
+    # Entrée en cache vieille de plus d'1h (> CACHE_FRESHNESS) : un tool garmin_get_* normal
+    # la considérerait périmée, mais la météo d'une activité passée est immuable.
+    stale_time = (datetime.now(PARIS_TZ) - timedelta(hours=5)).isoformat()
+    conn.execute(
+        "INSERT INTO garmin_cache (date, type, payload_json, fetched_at) VALUES (?, ?, ?, ?)",
+        ("999", "activity_weather", '{"temp_celsius": 12.0}', stale_time),
+    )
+    conn.commit()
+
+    result = await tools["garmin_get_activity_weather"]("999")
+
+    assert result == {"temp_celsius": 12.0}
+    fake_client.get_activity_weather.assert_not_called()
+
+
+async def test_activity_weather_error_handling(tools: dict, fake_client: MagicMock) -> None:
+    fake_client.get_activity_weather.side_effect = GarminUnavailableError("Garmin Connect injoignable")
+
+    result = await tools["garmin_get_activity_weather"]("1")
+
+    assert result["error"] is True
+    assert "injoignable" in result["message"]
+
+
+async def test_activity_details_fetches_then_caches_without_expiry(tools: dict, fake_client: MagicMock) -> None:
+    fake_client.get_activity_details.return_value = {
+        "time_s": [0, 1, 2],
+        "heart_rate_bpm": [73, 73, 74],
+        "pace_min_per_km": [7.4, None, 7.1],
+        "elevation_m": [64.4, 64.4, 64.4],
+    }
+
+    first = await tools["garmin_get_activity_details"]("24040147871")
+    second = await tools["garmin_get_activity_details"]("24040147871")
+
+    assert second == first
+    fake_client.get_activity_details.assert_called_once_with("24040147871")
+
+
+async def test_activity_details_cache_ignores_freshness_window(
+    tools: dict, fake_client: MagicMock, conn: sqlite3.Connection
+) -> None:
+    stale_time = (datetime.now(PARIS_TZ) - timedelta(hours=5)).isoformat()
+    conn.execute(
+        "INSERT INTO garmin_cache (date, type, payload_json, fetched_at) VALUES (?, ?, ?, ?)",
+        ("999", "activity_details", '{"time_s": [0]}', stale_time),
+    )
+    conn.commit()
+
+    result = await tools["garmin_get_activity_details"]("999")
+
+    assert result == {"time_s": [0]}
+    fake_client.get_activity_details.assert_not_called()
+
+
+async def test_activity_details_error_handling(tools: dict, fake_client: MagicMock) -> None:
+    fake_client.get_activity_details.side_effect = GarminAuthenticationError("bad creds")
+
+    result = await tools["garmin_get_activity_details"]("1")
+
+    assert result == {"error": True, "message": "Identifiants Garmin invalides : bad creds"}
+
+
+# ---------------------------------------------------------------------------
+# Tool garmin_push_workout
+# ---------------------------------------------------------------------------
+
+_COURSE_STRUCTURE = {
+    "discipline": "course",
+    "warmup": {"duration_sec": 900},
+    "blocks": [
+        {
+            "repeat": 6,
+            "steps": [
+                {"type": "interval", "duration_sec": 90, "target": {"type": "pace_min_per_km", "low": 3.33, "high": 3.5}},
+                {"type": "recovery", "duration_sec": 90},
+            ],
+        }
+    ],
+    "cooldown": {"duration_sec": 600},
+}
+
+
+async def test_push_workout_dry_run_by_default_makes_no_write_call(tools: dict, fake_client: MagicMock) -> None:
+    result = await tools["garmin_push_workout"]("2026-08-24", "24/08 - Fractionné VMA 6x400", _COURSE_STRUCTURE)
+
+    assert result["status"] == "dry_run"
+    assert result["payload"]["workoutName"] == "24/08 - Fractionné VMA 6x400"
+    fake_client.upload_workout.assert_not_called()
+    fake_client.schedule_workout.assert_not_called()
+    fake_client.get_scheduled_workouts.assert_not_called()
+
+
+async def test_push_workout_real_run_uploads_and_schedules(tools: dict, fake_client: MagicMock) -> None:
+    fake_client.get_scheduled_workouts.return_value = {"calendarItems": []}
+    fake_client.upload_workout.return_value = {"workoutId": 555}
+
+    result = await tools["garmin_push_workout"](
+        "2026-08-24", "24/08 - Fractionné VMA 6x400", _COURSE_STRUCTURE, dry_run=False
+    )
+
+    assert result == {"status": "ok", "workout_id": 555, "scheduled_date": "2026-08-24"}
+    fake_client.get_scheduled_workouts.assert_called_once_with(2026, 8)
+    fake_client.upload_workout.assert_called_once()
+    fake_client.schedule_workout.assert_called_once_with(555, "2026-08-24")
+
+
+async def test_push_workout_skips_duplicate_same_name_and_date(tools: dict, fake_client: MagicMock) -> None:
+    # Forme réelle observée sur un vrai compte : "calendarItems"/"title" (cf. README).
+    fake_client.get_scheduled_workouts.return_value = {
+        "calendarItems": [
+            {"itemType": "workout", "title": "24/08 - Fractionné VMA 6x400", "date": "2026-08-24", "workoutId": 111}
+        ]
+    }
+
+    result = await tools["garmin_push_workout"](
+        "2026-08-24", "24/08 - Fractionné VMA 6x400", _COURSE_STRUCTURE, dry_run=False
+    )
+
+    assert result == {"status": "already_scheduled", "workout_id": 111, "scheduled_date": "2026-08-24"}
+    fake_client.upload_workout.assert_not_called()
+    fake_client.schedule_workout.assert_not_called()
+
+
+async def test_push_workout_ignores_past_activity_with_same_name_and_date(
+    tools: dict, fake_client: MagicMock
+) -> None:
+    # Forme réelle observée sur un vrai compte : "calendarItems" mélange activités déjà
+    # réalisées (itemType="activity") et séances programmées — une activité passée ne
+    # doit jamais être prise pour un doublon de séance à programmer (cf. README).
+    fake_client.get_scheduled_workouts.return_value = {
+        "calendarItems": [
+            {"itemType": "activity", "title": "24/08 - Fractionné VMA 6x400", "date": "2026-08-24", "id": 999}
+        ]
+    }
+    fake_client.upload_workout.return_value = {"workoutId": 555}
+
+    result = await tools["garmin_push_workout"](
+        "2026-08-24", "24/08 - Fractionné VMA 6x400", _COURSE_STRUCTURE, dry_run=False
+    )
+
+    assert result == {"status": "ok", "workout_id": 555, "scheduled_date": "2026-08-24"}
+    fake_client.upload_workout.assert_called_once()
+    fake_client.schedule_workout.assert_called_once_with(555, "2026-08-24")
+
+
+async def test_push_workout_retries_schedule_on_failure(tools: dict, fake_client: MagicMock) -> None:
+    fake_client.get_scheduled_workouts.return_value = {"calendarItems": []}
+    fake_client.upload_workout.return_value = {"workoutId": 777}
+    fake_client.schedule_workout.side_effect = [GarminUnavailableError("timeout"), GarminUnavailableError("timeout"), None]
+
+    result = await tools["garmin_push_workout"](
+        "2026-08-24", "24/08 - Fractionné VMA 6x400", _COURSE_STRUCTURE, dry_run=False
+    )
+
+    assert result == {"status": "ok", "workout_id": 777, "scheduled_date": "2026-08-24"}
+    assert fake_client.schedule_workout.call_count == 3
+
+
+async def test_push_workout_returns_orphan_workout_id_after_exhausted_retries(
+    tools: dict, fake_client: MagicMock
+) -> None:
+    fake_client.get_scheduled_workouts.return_value = {"calendarItems": []}
+    fake_client.upload_workout.return_value = {"workoutId": 999}
+    fake_client.schedule_workout.side_effect = GarminUnavailableError("toujours en échec")
+
+    result = await tools["garmin_push_workout"](
+        "2026-08-24", "24/08 - Fractionné VMA 6x400", _COURSE_STRUCTURE, dry_run=False
+    )
+
+    assert result["error"] is True
+    assert result["workout_id"] == 999
+    assert "999" in result["message"]
+    assert fake_client.schedule_workout.call_count == 3
+
+
+async def test_push_workout_invalid_structure_returns_error(tools: dict, fake_client: MagicMock) -> None:
+    bad_structure = {"discipline": "nage", "blocks": []}
+
+    result = await tools["garmin_push_workout"]("2026-08-24", "Séance", bad_structure)
+
+    assert result["error"] is True
+    fake_client.upload_workout.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tool garmin_delete_workout
+# ---------------------------------------------------------------------------
+
+
+async def test_delete_workout_success(tools: dict, fake_client: MagicMock) -> None:
+    fake_client.delete_workout.return_value = {}
+
+    result = await tools["garmin_delete_workout"](1670358637)
+
+    assert result == {"status": "ok", "workout_id": 1670358637}
+    fake_client.delete_workout.assert_called_once_with(1670358637)
+
+
+async def test_delete_workout_error_handling(tools: dict, fake_client: MagicMock) -> None:
+    fake_client.delete_workout.side_effect = GarminUnavailableError("Garmin Connect injoignable")
+
+    result = await tools["garmin_delete_workout"](123)
+
+    assert result["error"] is True
+    assert "injoignable" in result["message"]
+
+
+def test_get_activity_weather_converts_fahrenheit_to_celsius(client: GarminClient) -> None:
+    # Forme réelle observée sur un compte Garmin : temp/apparentTemp/dewPoint en °F
+    # (66°F par une soirée d'août pluvieuse à Paris — 66°C serait absurde, cf. README).
+    client._garmin.get_activity_weather.return_value = {
+        "temp": 66,
+        "apparentTemp": 66,
+        "dewPoint": 63,
+        "relativeHumidity": 88,
+        "windSpeed": 18,
+        "windGust": None,
+        "windDirectionCompassPoint": "wnw",
+        "weatherStationDTO": {"name": "Villacoublay"},
+        "weatherTypeDTO": {"desc": "Light Rain"},
+    }
+
+    result = client.get_activity_weather("24040147871")
+
+    assert result["temp_celsius"] == 18.9
+    assert result["apparent_temp_celsius"] == 18.9
+    assert result["dew_point_celsius"] == 17.2
+    assert result["humidity_percent"] == 88
+    assert result["wind_speed_raw"] == 18
+    assert result["wind_gust_raw"] is None
+    assert result["wind_direction_compass"] == "wnw"
+    assert result["condition"] == "Light Rain"
+    assert result["station_name"] == "Villacoublay"
+
+
+def test_get_activity_details_uses_metrics_index_not_list_order(client: GarminClient) -> None:
+    # Forme réelle observée sur un compte Garmin : l'ordre de la liste metricDescriptors ne
+    # correspond PAS à l'ordre réel dans le tableau "metrics" de chaque point — seul le champ
+    # `metricsIndex` fait foi (ex. "directRunCadence" est listé en premier mais son
+    # metricsIndex réel est 4, cf. README "Écarts volontaires").
+    client._garmin.get_activity_details.return_value = {
+        "metricDescriptors": [
+            {"metricsIndex": 4, "key": "directRunCadence", "unit": {"key": "stepsPerMinute"}},
+            {"metricsIndex": 0, "key": "directTimestamp", "unit": {"key": "gmt"}},
+            {"metricsIndex": 6, "key": "directHeartRate", "unit": {"key": "bpm"}},
+            {"metricsIndex": 9, "key": "sumElapsedDuration", "unit": {"key": "second"}},
+            {"metricsIndex": 5, "key": "directGradeAdjustedSpeed", "unit": {"key": "mps"}},
+            {"metricsIndex": 11, "key": "directElevation", "unit": {"key": "meter"}},
+        ],
+        "activityDetailMetrics": [
+            {"metrics": [1787160420000.0, 999, 999, 999, 60.0, 1.344, 73.0, 999, 999, 0.0, 999, 64.4]},
+            {"metrics": [1787160421000.0, 999, 999, 999, 60.0, 1.325, 73.0, 999, 999, 1.0, 999, 64.4]},
+        ],
+    }
+
+    result = client.get_activity_details("24040147871")
+
+    assert result["time_s"] == [0, 1]
+    assert result["heart_rate_bpm"] == [73, 73]
+    assert result["elevation_m"] == [64.4, 64.4]
+    # pace_min_per_km dérivé de directGradeAdjustedSpeed (1.344 m/s -> ~12.4 min/km)
+    assert result["pace_min_per_km"][0] == pytest.approx(12.4, abs=0.05)
+
+
+def test_get_activity_details_falls_back_to_grade_adjusted_speed_when_direct_speed_missing(
+    client: GarminClient,
+) -> None:
+    # "directSpeed" absent sur certaines activités (cf. README) : repli sur
+    # "directGradeAdjustedSpeed", seul champ de vitesse alors disponible.
+    client._garmin.get_activity_details.return_value = {
+        "metricDescriptors": [
+            {"metricsIndex": 0, "key": "directGradeAdjustedSpeed", "unit": {"key": "mps"}},
+        ],
+        "activityDetailMetrics": [{"metrics": [2.5]}],
+    }
+
+    result = client.get_activity_details("1")
+
+    assert result["pace_min_per_km"][0] is not None
+
+
+def test_get_activity_details_missing_field_returns_none_series(client: GarminClient) -> None:
+    client._garmin.get_activity_details.return_value = {
+        "metricDescriptors": [{"metricsIndex": 0, "key": "directHeartRate", "unit": {"key": "bpm"}}],
+        "activityDetailMetrics": [{"metrics": [140.0]}],
+    }
+
+    result = client.get_activity_details("1")
+
+    assert result["elevation_m"] == [None]
+    assert result["pace_min_per_km"] == [None]
+    assert result["heart_rate_bpm"] == [140]
+
+
 def test_login_maps_authentication_error(tmp_path) -> None:
     gc = GarminClient("a@b.com", "wrong-pw", str(tmp_path / "tokenstore"))
     gc._garmin = MagicMock()

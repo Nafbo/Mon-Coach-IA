@@ -167,6 +167,51 @@ Deux ajouts supplémentaires, hors des 17 tools de la spec initiale :
   du résultat) plutôt que de mélanger silencieusement une donnée ancienne avec la date du
   jour.
 
+Quatre tools supplémentaires (hors des 18 tools ci-dessus), ajoutés et validés en conditions
+réelles :
+
+- **`garmin_get_activity_weather`** : `temp`/`apparentTemp`/`dewPoint` sont exposés par
+  `garminconnect` en **°F**, pas en °C — repéré car `66` pour une soirée d'août pluvieuse à
+  Paris serait absurde en Celsius (`66°C`) mais cohérent en Fahrenheit (`18.9°C`). Convertis
+  en Celsius (`temp_celsius`, `apparent_temp_celsius`, `dew_point_celsius`). En revanche
+  `windSpeed`/`windGust` n'ont pas de valeur assez caractéristique pour trancher leur unité
+  (mph vs km/h plausibles tous les deux) — laissés bruts (`wind_speed_raw`, `wind_gust_raw`)
+  plutôt que de deviner une conversion non vérifiée.
+- **`garmin_get_activity_details`** : la forme brute confirme le couple
+  `metricDescriptors`/`activityDetailMetrics` supposé dans le brief, avec un piège non
+  anticipé : **l'ordre de la liste `metricDescriptors` ne correspond pas à l'ordre réel des
+  valeurs dans le tableau `metrics` de chaque point** — seul le champ `metricsIndex` de
+  chaque descripteur fait foi (ex. `directRunCadence` est listé en premier mais son
+  `metricsIndex` réel est `4`). Le parsing construit une table `clé -> metricsIndex` à partir
+  des descripteurs avant d'indexer, plutôt que de supposer un ordre. Par ailleurs
+  `directSpeed` (vitesse brute) est absent sur l'activité utilisée pour valider ce parsing —
+  repli sur `directGradeAdjustedSpeed` (vitesse ajustée au dénivelé), seul champ de vitesse
+  disponible dans ce cas ; à surveiller si `directSpeed` s'avère présent sur d'autres types
+  d'activité.
+- **`garmin_push_workout`** : validé en conditions réelles (`dry_run=False`) après
+  l'implémentation initiale — `upload_workout` et `schedule_workout` ont fonctionné du
+  premier coup avec le payload produit par `workout_builder.build_workout`, et
+  `delete_workout` a bien nettoyé la séance de test ensuite. La forme réelle de
+  `get_scheduled_workouts` est `{"calendarItems": [...]}`, chaque item ayant un champ
+  `title` (pas `workoutName`) et `date`. **Piège confirmé sur un vrai compte** :
+  `calendarItems` mélange les activités déjà réalisées (`itemType: "activity"`) et les
+  séances programmées — sans filtrage, une activité passée portant par coïncidence le même
+  nom/date qu'une séance à programmer serait prise à tort pour un doublon et bloquerait le
+  push. `_find_duplicate_scheduled_workout` (`src/tools/garmin_tools.py`) ignore désormais
+  les entrées `itemType == "activity"`. Point non exercé : le vrai chemin "doublon détecté"
+  n'a pas été déclenché en conditions réelles (aucune séance programmée en conflit au moment
+  du test) — son comportement exact (`itemType` d'une vraie séance programmée non encore
+  réalisée, notamment) reste une hypothèse raisonnable plutôt qu'une certitude.
+  Autre hypothèse non explicitement tranchée par le brief : la numérotation `stepOrder`
+  (`src/workout_builder.py`) est **séquentielle globale** sur tout le workout, y compris à
+  l'intérieur d'un bloc répété (pas de redémarrage à 1 par groupe). Le vrai push a été
+  accepté par Garmin avec ce choix, mais rien ne garantit que ce soit la convention exacte
+  attendue par l'app/la montre plutôt qu'une simple tolérance de l'API à l'upload.
+- **`garmin_delete_workout`** (hors périmètre initial du brief) : ajouté après coup, wrapper
+  fin de `GarminClient.delete_workout` — utile pour nettoyer une séance de test comme celle
+  poussée par `garmin_push_workout` pendant la validation manuelle. Validé en conditions
+  réelles (suppression confirmée via une relecture de `get_scheduled_workouts`).
+
 ## Limites connues
 
 Les endpoints Garmin Connect utilisés pour la charge d'entraînement détaillée, le seuil

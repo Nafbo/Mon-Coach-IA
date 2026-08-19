@@ -72,18 +72,18 @@ class GarminClient:
         try:
             self._garmin.login(tokenstore=self._tokenstore_path)
             self._logged_in = True
+        # Les messages ci-dessous ne sont volontairement pas préfixés en français
+        # ("Identifiants Garmin invalides : ", "Garmin Connect injoignable : ", etc.) :
+        # ce préfixage est la responsabilité unique de `_garmin_error_message`
+        # (src/tools/garmin_tools.py), pour éviter un double préfixage à l'affichage.
         except GarminConnectAuthenticationError as exc:
-            raise GarminAuthenticationError(f"Identifiants Garmin invalides : {exc}") from exc
+            raise GarminAuthenticationError(str(exc)) from exc
         except GarminConnectTooManyRequestsError as exc:
-            raise GarminUnavailableError(
-                f"Trop de tentatives de connexion à Garmin Connect, réessayer plus tard : {exc}"
-            ) from exc
+            raise GarminUnavailableError(f"Trop de tentatives de connexion, réessayer plus tard : {exc}") from exc
         except GarminConnectConnectionError as exc:
-            raise GarminUnavailableError(f"Garmin Connect injoignable : {exc}") from exc
+            raise GarminUnavailableError(str(exc)) from exc
         except Exception as exc:  # défensif : ne jamais laisser fuiter une exception non catégorisée
-            raise GarminUnavailableError(
-                f"Erreur inattendue lors de la connexion à Garmin Connect : {exc}"
-            ) from exc
+            raise GarminUnavailableError(f"Erreur inattendue lors de la connexion : {exc}") from exc
 
     def _call(self, fn: Callable[..., T], *args: Any, _retry: bool = True, **kwargs: Any) -> T:
         self._ensure_login()
@@ -93,12 +93,12 @@ class GarminClient:
             if _retry:
                 self._logged_in = False
                 return self._call(fn, *args, _retry=False, **kwargs)
-            raise GarminAuthenticationError(f"Identifiants Garmin invalides : {exc}") from exc
+            raise GarminAuthenticationError(str(exc)) from exc
         except (GarminConnectConnectionError, GarminConnectTooManyRequestsError) as exc:
             if _retry:
                 self._logged_in = False
                 return self._call(fn, *args, _retry=False, **kwargs)
-            raise GarminUnavailableError(f"Garmin Connect injoignable : {exc}") from exc
+            raise GarminUnavailableError(str(exc)) from exc
 
     # -- données individuelles ---------------------------------------------
 
@@ -354,6 +354,84 @@ class GarminClient:
             },
         }
 
+    def get_activity_weather(self, activity_id: str | int) -> dict[str, Any]:
+        raw = self._call(self._garmin.get_activity_weather, str(activity_id))
+        data = raw if isinstance(raw, dict) else {}
+        weather_type = data.get("weatherTypeDTO") or {}
+        station = data.get("weatherStationDTO") or {}
+        return {
+            # temp/apparentTemp/dewPoint : observés en °F sur un vrai compte (66 pour une
+            # soirée d'août pluvieuse à Paris - incohérent en °C) — convertis en °C.
+            "temp_celsius": _fahrenheit_to_celsius(data.get("temp")),
+            "apparent_temp_celsius": _fahrenheit_to_celsius(data.get("apparentTemp")),
+            "dew_point_celsius": _fahrenheit_to_celsius(data.get("dewPoint")),
+            "humidity_percent": _to_int(data.get("relativeHumidity"), default=None),
+            # windSpeed/windGust : unité non confirmée (pas de valeur assez caractéristique
+            # pour trancher mph/km/h comme pour la température) — laissés bruts, cf. README.
+            "wind_speed_raw": _to_int(data.get("windSpeed"), default=None),
+            "wind_gust_raw": _to_int(data.get("windGust"), default=None),
+            "wind_direction_compass": data.get("windDirectionCompassPoint"),
+            "condition": weather_type.get("desc"),
+            "station_name": station.get("name"),
+        }
+
+    def get_activity_details(self, activity_id: str | int) -> dict[str, Any]:
+        raw = self._call(self._garmin.get_activity_details, str(activity_id))
+        data = raw if isinstance(raw, dict) else {}
+        descriptors = data.get("metricDescriptors") or []
+        # La position d'un champ dans le tableau "metrics" de chaque point est donnée par
+        # `metricsIndex` du descripteur correspondant — PAS par l'ordre de la liste
+        # `metricDescriptors` elle-même (vérifié sur un vrai compte : l'ordre de la liste ne
+        # correspond pas à l'ordre réel des index, ex. "directRunCadence" est listé en
+        # premier mais son metricsIndex réel est 4).
+        index_by_key = {d["key"]: d["metricsIndex"] for d in descriptors if "key" in d and "metricsIndex" in d}
+        points = data.get("activityDetailMetrics") or []
+
+        def _index_for(*candidate_keys: str) -> int | None:
+            return next((index_by_key[k] for k in candidate_keys if k in index_by_key), None)
+
+        time_idx = _index_for("sumElapsedDuration")
+        hr_idx = _index_for("directHeartRate")
+        # "directSpeed" n'est pas exposé sur toutes les activités (absent sur l'activité
+        # utilisée pour valider ce parsing) — repli sur "directGradeAdjustedSpeed" (ajustée
+        # au dénivelé), seul champ de vitesse disponible dans ce cas.
+        speed_idx = _index_for("directSpeed", "directGradeAdjustedSpeed")
+        elevation_idx = _index_for("directElevation")
+
+        def _value_at(metrics: list[Any] | None, idx: int | None) -> Any:
+            return metrics[idx] if metrics is not None and idx is not None and idx < len(metrics) else None
+
+        time_s: list[int | None] = []
+        heart_rate_bpm: list[int | None] = []
+        pace_min_per_km: list[float | None] = []
+        elevation_m: list[float | None] = []
+        for point in points:
+            metrics = point.get("metrics") if isinstance(point, dict) else None
+            metrics = metrics if isinstance(metrics, list) else None
+            time_s.append(_to_int(_value_at(metrics, time_idx), default=None))
+            heart_rate_bpm.append(_to_int(_value_at(metrics, hr_idx), default=None))
+            pace_min_per_km.append(_pace_min_per_km(_value_at(metrics, speed_idx)))
+            elevation_m.append(_round_or_none(_value_at(metrics, elevation_idx)))
+
+        return {
+            "time_s": time_s,
+            "heart_rate_bpm": heart_rate_bpm,
+            "pace_min_per_km": pace_min_per_km,
+            "elevation_m": elevation_m,
+        }
+
+    def upload_workout(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._call(self._garmin.upload_workout, payload)
+
+    def schedule_workout(self, workout_id: int | str, date_str: str) -> dict[str, Any]:
+        return self._call(self._garmin.schedule_workout, workout_id, date_str)
+
+    def get_scheduled_workouts(self, year: int, month: int) -> Any:
+        return self._call(self._garmin.get_scheduled_workouts, year, month)
+
+    def delete_workout(self, workout_id: int | str) -> Any:
+        return self._call(self._garmin.delete_workout, workout_id)
+
     def get_intensity_minutes(self, week_start: date) -> dict[str, Any]:
         week_end = week_start + timedelta(days=6)
         raw = self._call(self._garmin.get_weekly_intensity_minutes, week_start.isoformat(), week_end.isoformat())
@@ -430,6 +508,12 @@ def _pace_min_per_100m(speed_m_per_s: Any) -> float | None:
 
 def _round_or_none(value: Any, ndigits: int = 1) -> float | None:
     return round(value, ndigits) if isinstance(value, (int, float)) else None
+
+
+def _fahrenheit_to_celsius(value: Any) -> float | None:
+    if not isinstance(value, (int, float)):
+        return None
+    return round((value - 32) * 5 / 9, 1)
 
 
 def _pool_length_m(pool_length: Any, unit: Any) -> float | None:

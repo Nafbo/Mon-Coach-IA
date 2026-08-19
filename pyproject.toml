@@ -5,7 +5,8 @@ description = "Serveur MCP distant exposant des données Garmin Connect et un é
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=1.2.0",
-    "garminconnect>=0.2.19",
+    "garminconnect>=0.3.2",
+    "pydantic>=2.0.0",
     "uvicorn>=0.30.0",
     "starlette>=0.37.0",
     "python-dotenv>=1.0.0",
