@@ -15,7 +15,6 @@ from garminconnect.workout import (
     ExecutableStep,
     RepeatGroup,
     RunningWorkout,
-    TargetType,
     WorkoutSegment,
     create_cooldown_step,
     create_interval_step,
@@ -28,6 +27,16 @@ _DISCIPLINE_WORKOUT_CLASS: dict[str, type] = {
     "course": RunningWorkout,
     "velo": CyclingWorkout,
 }
+
+# Identifiants numériques du protocole Garmin (pas un choix de `garminconnect`) : vérifiés
+# stables entre garminconnect 0.3.2 et 0.3.9, alors que les noms d'attributs Python de
+# `TargetType` ont été renommés entre ces deux versions (POWER -> POWER_ZONE,
+# HEART_RATE -> HEART_RATE_ZONE, SPEED -> SPEED_ZONE, cf. README "Écarts volontaires").
+# On n'importe donc plus `TargetType` de la lib, pour ne plus dépendre de ce nommage instable.
+_TARGET_TYPE_NO_TARGET = 1
+_TARGET_TYPE_POWER_ZONE = 2
+_TARGET_TYPE_HEART_RATE_ZONE = 4
+_TARGET_TYPE_SPEED_ZONE = 5
 
 # Répliqué depuis garminconnect.workout.RunningWorkout/CyclingWorkout (leurs Field
 # default_factory ne sont pas récupérables proprement sans instancier l'objet).
@@ -57,7 +66,7 @@ def _build_target(target: dict[str, Any] | None) -> dict[str, Any]:
     if not target:
         return {
             "targetType": {
-                "workoutTargetTypeId": TargetType.NO_TARGET,
+                "workoutTargetTypeId": _TARGET_TYPE_NO_TARGET,
                 "workoutTargetTypeKey": "no.target",
                 "displayOrder": 1,
             }
@@ -72,21 +81,21 @@ def _build_target(target: dict[str, Any] | None) -> dict[str, Any]:
         value_one = 1000 / (high * 60)  # allure la plus lente -> vitesse la plus basse
         value_two = 1000 / (low * 60)  # allure la plus rapide -> vitesse la plus haute
         target_type_dict = {
-            "workoutTargetTypeId": TargetType.SPEED,
+            "workoutTargetTypeId": _TARGET_TYPE_SPEED_ZONE,
             "workoutTargetTypeKey": "speed.zone",
             "displayOrder": 1,
         }
     elif target_type == "power_watts":
         value_one, value_two = float(low), float(high)
         target_type_dict = {
-            "workoutTargetTypeId": TargetType.POWER,
+            "workoutTargetTypeId": _TARGET_TYPE_POWER_ZONE,
             "workoutTargetTypeKey": "power.zone",
             "displayOrder": 1,
         }
     elif target_type == "hr_bpm":
         value_one, value_two = float(low), float(high)
         target_type_dict = {
-            "workoutTargetTypeId": TargetType.HEART_RATE,
+            "workoutTargetTypeId": _TARGET_TYPE_HEART_RATE_ZONE,
             "workoutTargetTypeKey": "heart.rate.zone",
             "displayOrder": 1,
         }

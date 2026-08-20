@@ -207,6 +207,14 @@ réelles :
   l'intérieur d'un bloc répété (pas de redémarrage à 1 par groupe). Le vrai push a été
   accepté par Garmin avec ce choix, mais rien ne garantit que ce soit la convention exacte
   attendue par l'app/la montre plutôt qu'une simple tolérance de l'API à l'upload.
+  **Piège trouvé au déploiement** : `garminconnect.workout.TargetType` a renommé ses
+  attributs entre 0.3.2 (poste local, Python 3.10) et 0.3.9 (VM prod, Python 3.12+) —
+  `POWER`→`POWER_ZONE`, `HEART_RATE`→`HEART_RATE_ZONE`, `SPEED`→`SPEED_ZONE` — un
+  changement cassant dans une simple mise à jour de patch. Les identifiants numériques
+  sous-jacents (`workoutTargetTypeId`), eux, sont stables entre les deux versions (ce
+  sont ceux du protocole Garmin, pas un choix de `garminconnect`). `src/workout_builder.py`
+  n'importe donc plus `TargetType` et utilise directement ces entiers, pour rester
+  indépendant du nommage Python de la lib d'une version à l'autre.
 - **`garmin_delete_workout`** (hors périmètre initial du brief) : ajouté après coup, wrapper
   fin de `GarminClient.delete_workout` — utile pour nettoyer une séance de test comme celle
   poussée par `garmin_push_workout` pendant la validation manuelle. Validé en conditions
