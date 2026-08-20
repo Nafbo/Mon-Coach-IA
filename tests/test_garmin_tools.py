@@ -412,6 +412,7 @@ def test_get_sleep_converts_seconds_to_minutes(client: GarminClient) -> None:
 def test_get_recent_activities_normalizes_types_and_filters_by_date(client: GarminClient) -> None:
     client._garmin.get_activities.return_value = [
         {
+            "activityId": 24040147871,
             "startTimeLocal": "2026-08-05 07:00:00",
             "activityType": {"typeKey": "trail_running"},
             "duration": 1800,
@@ -444,6 +445,8 @@ def test_get_recent_activities_normalizes_types_and_filters_by_date(client: Garm
     result = client.get_recent_activities(since=date(2026, 8, 3), fetch_limit=20)
 
     assert len(result) == 2
+    assert result[0]["activity_id"] == 24040147871
+    assert result[1]["activity_id"] is None  # activityId absent du fixture -> None, pas de crash
     assert result[0]["date"] == "2026-08-05"
     assert result[0]["type"] == "course"
     assert result[0]["garmin_type"] == "trail_running"

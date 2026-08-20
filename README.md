@@ -261,6 +261,11 @@ Plusieurs tools s'écartent du schéma initialement envisagé, validés en condi
 - **`garmin_sync`** : `synced_at` est en **Europe/Paris**, pas en UTC — cohérent avec la
   contrainte générale de fuseau horaire (cf. [Fuseau horaire](#fuseau-horaire)).
 - **`garmin_get_recent_activities`** : chaque activité expose des champs supplémentaires.
+  - **`activity_id`** (`null` si absent du payload Garmin) — ajouté après coup : sans ce
+    champ, impossible d'enchaîner vers `garmin_get_activity_weather`/
+    `garmin_get_activity_details` (qui exigent un `activity_id`) sans que l'utilisateur aille
+    le chercher manuellement dans l'URL d'une activité sur connect.garmin.com. Trouvé en
+    testant les nouveaux tools en conditions réelles.
   - Général : `garmin_type` (type brut Garmin, ex. `trail_running` vs `running`),
     `effet_entrainement` (`trainingEffectLabel`, ex. `TEMPO`, `LACTATE_THRESHOLD`,
     `AEROBIC_BASE`, `RECOVERY`), `effet_aerobie`/`effet_aerobie_message` et

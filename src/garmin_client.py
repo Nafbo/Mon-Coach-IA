@@ -239,6 +239,7 @@ class GarminClient:
 
             results.append(
                 {
+                    "activity_id": act.get("activityId"),
                     "date": act_date.isoformat(),
                     "type": normalized_type,
                     "garmin_type": type_key,
