@@ -1080,6 +1080,174 @@ def test_get_activity_details_missing_field_returns_none_series(client: GarminCl
     assert result["heart_rate_bpm"] == [140]
 
 
+# ---------------------------------------------------------------------------
+# GarminClient.get_swim_splits
+# ---------------------------------------------------------------------------
+
+
+def test_get_swim_splits_parses_real_shape(client: GarminClient) -> None:
+    # Forme réelle observée sur un vrai compte (get_activity_splits, pas
+    # get_activity_typed_splits qui renvoie une liste vide pour la nage — cf. README).
+    client._garmin.get_activity_splits.return_value = {
+        "activityId": 24052008564,
+        "lapDTOs": [
+            {
+                "lapIndex": 1,
+                "lengthDTOs": [
+                    {
+                        "startTimeGMT": "2026-08-20T17:01:37.0",
+                        "distance": 25.0,
+                        "duration": 26.937,
+                        "averageHR": 81.0,
+                        "totalNumberOfStrokes": 11,
+                        "averageSWOLF": 38.0,
+                        "lengthIndex": 1,
+                        "swimStroke": "FREESTYLE",
+                    },
+                    {
+                        "startTimeGMT": "2026-08-20T17:02:04.0",
+                        "distance": 25.0,
+                        "duration": 34.375,
+                        "averageHR": 104.0,
+                        "totalNumberOfStrokes": 18,
+                        "averageSWOLF": 52.0,
+                        "lengthIndex": 2,
+                        "swimStroke": "BREASTSTROKE",
+                    },
+                ],
+            },
+            {
+                # Lap 2 : lengthIndex continue globalement (pas de redémarrage à 1).
+                "lapIndex": 2,
+                "lengthDTOs": [
+                    {
+                        "startTimeGMT": "2026-08-20T17:05:00.0",
+                        "distance": 25.0,
+                        "duration": 30.0,
+                        "averageHR": 110.0,
+                        "totalNumberOfStrokes": 14,
+                        "averageSWOLF": 40.0,
+                        "lengthIndex": 22,
+                        "swimStroke": "FREESTYLE",
+                    },
+                ],
+            },
+        ],
+    }
+
+    result = client.get_swim_splits("24052008564")
+
+    assert len(result) == 3
+    assert result[0] == {
+        "length_idx": 1,
+        "start_s": 0,
+        "duration_s": 26.9,
+        "distance_m": 25.0,
+        "avg_hr": 81,
+        "swolf": 38,
+        "stroke": "FREESTYLE",
+        "pace_min_per_100m": round(26.937 / 25.0 * 100 / 60, 2),
+        "pace_min_sec_per_100m": "1:48",
+    }
+    assert result[1]["length_idx"] == 2
+    assert result[1]["start_s"] == 27  # 17:02:04 - 17:01:37 = 27s
+    assert result[2]["length_idx"] == 22  # index global, pas remis à 1 au lap 2
+    assert result[2]["start_s"] == 203  # 17:05:00 - 17:01:37 = 3min23s
+
+
+def test_get_swim_splits_no_lengths_returns_empty_list(client: GarminClient) -> None:
+    # Cas attendu pour l'eau libre (open_water_swimming, pas de mur -> pas de longueurs) —
+    # non vérifié sur un vrai compte eau libre, cf. docstring de get_swim_splits.
+    client._garmin.get_activity_splits.return_value = {"activityId": 1, "lapDTOs": []}
+
+    result = client.get_swim_splits("1")
+
+    assert result == []
+
+
+def test_get_swim_splits_missing_lap_dtos_returns_empty_list(client: GarminClient) -> None:
+    client._garmin.get_activity_splits.return_value = {"activityId": 1}
+
+    result = client.get_swim_splits("1")
+
+    assert result == []
+
+
+def test_get_swim_splits_pace_null_when_distance_zero(client: GarminClient) -> None:
+    client._garmin.get_activity_splits.return_value = {
+        "lapDTOs": [
+            {
+                "lengthDTOs": [
+                    {
+                        "startTimeGMT": "2026-08-20T17:01:37.0",
+                        "distance": 0,
+                        "duration": 5.0,
+                        "lengthIndex": 1,
+                    }
+                ]
+            }
+        ]
+    }
+
+    result = client.get_swim_splits("1")
+
+    assert result[0]["pace_min_per_100m"] is None
+    assert result[0]["pace_min_sec_per_100m"] is None
+
+
+def test_format_pace_mm_ss_conversion() -> None:
+    from src.garmin_client import _format_pace_mm_ss
+
+    assert _format_pace_mm_ss(0.95) == "0:57"
+    assert _format_pace_mm_ss(1.74) == "1:44"
+    assert _format_pace_mm_ss(2.0) == "2:00"
+    assert _format_pace_mm_ss(None) is None
+
+
+# ---------------------------------------------------------------------------
+# Tool garmin_get_swim_splits
+# ---------------------------------------------------------------------------
+
+
+async def test_swim_splits_tool_fetches_then_caches_without_expiry(tools: dict, fake_client: MagicMock) -> None:
+    fake_client.get_swim_splits.return_value = [
+        {"length_idx": 1, "start_s": 0, "duration_s": 26.9, "distance_m": 25.0, "avg_hr": 81, "swolf": 38,
+         "stroke": "FREESTYLE", "pace_min_per_100m": 1.8}
+    ]
+
+    first = await tools["garmin_get_swim_splits"]("24052008564")
+    second = await tools["garmin_get_swim_splits"]("24052008564")
+
+    assert first == {"splits": fake_client.get_swim_splits.return_value}
+    assert second == first
+    fake_client.get_swim_splits.assert_called_once_with("24052008564")
+
+
+async def test_swim_splits_tool_cache_ignores_freshness_window(
+    tools: dict, fake_client: MagicMock, conn: sqlite3.Connection
+) -> None:
+    stale_time = (datetime.now(PARIS_TZ) - timedelta(hours=5)).isoformat()
+    conn.execute(
+        "INSERT INTO garmin_cache (date, type, payload_json, fetched_at) VALUES (?, ?, ?, ?)",
+        ("999", "swim_splits", '{"splits": []}', stale_time),
+    )
+    conn.commit()
+
+    result = await tools["garmin_get_swim_splits"]("999")
+
+    assert result == {"splits": []}
+    fake_client.get_swim_splits.assert_not_called()
+
+
+async def test_swim_splits_tool_error_handling(tools: dict, fake_client: MagicMock) -> None:
+    fake_client.get_swim_splits.side_effect = GarminUnavailableError("Garmin Connect injoignable")
+
+    result = await tools["garmin_get_swim_splits"]("1")
+
+    assert result["error"] is True
+    assert "injoignable" in result["message"]
+
+
 def test_login_maps_authentication_error(tmp_path) -> None:
     gc = GarminClient("a@b.com", "wrong-pw", str(tmp_path / "tokenstore"))
     gc._garmin = MagicMock()

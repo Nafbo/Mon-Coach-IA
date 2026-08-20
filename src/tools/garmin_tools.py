@@ -273,6 +273,18 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
             _store_cache(conn, "activity_details", key, cached)
         return cached
 
+    async def garmin_get_swim_splits(activity_id: str) -> dict[str, Any]:
+        key = str(activity_id)
+        cached = _get_cached(conn, "swim_splits", key, ignore_freshness=True)
+        if cached is None:
+            try:
+                splits = client.get_swim_splits(activity_id)
+            except Exception as exc:
+                return {"error": True, "message": _garmin_error_message(exc)}
+            cached = {"splits": splits}
+            _store_cache(conn, "swim_splits", key, cached)
+        return cached
+
     async def garmin_push_workout(
         date: str, name: str, structure: dict[str, Any], dry_run: bool = True
     ) -> dict[str, Any]:
@@ -349,6 +361,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         "garmin_get_intensity_minutes": garmin_get_intensity_minutes,
         "garmin_get_activity_weather": garmin_get_activity_weather,
         "garmin_get_activity_details": garmin_get_activity_details,
+        "garmin_get_swim_splits": garmin_get_swim_splits,
         "garmin_push_workout": garmin_push_workout,
         "garmin_delete_workout": garmin_delete_workout,
     }

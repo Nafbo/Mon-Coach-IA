@@ -421,6 +421,65 @@ class GarminClient:
             "elevation_m": elevation_m,
         }
 
+    def get_swim_splits(self, activity_id: str | int) -> list[dict[str, Any]]:
+        """Longueurs de piscine d'une activité de nage (`get_activity_details` ne contient
+        pas d'allure continue en piscine : pas de vitesse GPS, Garmin ne calcule l'allure
+        que par longueur). Vérifié sur un vrai compte : `get_activity_typed_splits` renvoie
+        une liste vide pour la nage — c'est `get_activity_splits` (lapDTOs -> lengthDTOs)
+        qui contient les données par longueur. `lengthIndex` est déjà global sur toute
+        l'activité (pas de redémarrage à 1 par lap), réutilisé tel quel comme `length_idx`.
+
+        Retourne une liste vide (pas d'exception) si l'activité n'a pas de longueurs
+        exploitables — cas attendu en eau libre (`open_water_swimming`), où il n'y a pas de
+        mur pour marquer les longueurs. Non vérifié sur un vrai compte eau libre (aucune
+        activité de ce type disponible au moment de l'implémentation) : à confirmer.
+        """
+        raw = self._call(self._garmin.get_activity_splits, str(activity_id))
+        data = raw if isinstance(raw, dict) else {}
+        laps = data.get("lapDTOs") or []
+
+        lengths: list[dict[str, Any]] = []
+        for lap in laps:
+            if not isinstance(lap, dict):
+                continue
+            for length in lap.get("lengthDTOs") or []:
+                if isinstance(length, dict):
+                    lengths.append(length)
+
+        if not lengths:
+            return []
+
+        first_start = _parse_garmin_gmt(lengths[0].get("startTimeGMT"))
+
+        results: list[dict[str, Any]] = []
+        for length in lengths:
+            distance = length.get("distance")
+            duration = length.get("duration")
+            start = _parse_garmin_gmt(length.get("startTimeGMT"))
+            start_s = (
+                _to_int((start - first_start).total_seconds(), default=None)
+                if start is not None and first_start is not None
+                else None
+            )
+            pace_min_per_100m = None
+            if isinstance(duration, (int, float)) and isinstance(distance, (int, float)) and distance > 0:
+                pace_min_per_100m = round(duration / distance * 100 / 60, 2)
+
+            results.append(
+                {
+                    "length_idx": _to_int(length.get("lengthIndex"), default=None),
+                    "start_s": start_s,
+                    "duration_s": _round_or_none(duration, ndigits=1),
+                    "distance_m": _round_or_none(distance, ndigits=1),
+                    "avg_hr": _to_int(length.get("averageHR"), default=None),
+                    "swolf": _to_int(length.get("averageSWOLF"), default=None),
+                    "stroke": length.get("swimStroke"),
+                    "pace_min_per_100m": pace_min_per_100m,
+                    "pace_min_sec_per_100m": _format_pace_mm_ss(pace_min_per_100m),
+                }
+            )
+        return results
+
     def upload_workout(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._call(self._garmin.upload_workout, payload)
 
@@ -515,6 +574,32 @@ def _fahrenheit_to_celsius(value: Any) -> float | None:
     if not isinstance(value, (int, float)):
         return None
     return round((value - 32) * 5 / 9, 1)
+
+
+def _format_pace_mm_ss(decimal_minutes: float | None) -> str | None:
+    """Convertit une allure en minutes décimales (ex. `1.74`) en `"M:SS"` (ex. `"1:44"`) —
+    `1.74` se lit comme "1,74 minute", pas "1 minute 74", format peu naturel à afficher tel
+    quel pour une allure de nage/course."""
+    if decimal_minutes is None:
+        return None
+    total_seconds = round(decimal_minutes * 60)
+    minutes, seconds = divmod(total_seconds, 60)
+    return f"{minutes}:{seconds:02d}"
+
+
+def _parse_garmin_gmt(value: Any) -> datetime | None:
+    """Parse un timestamp `startTimeGMT` façon Garmin (ex. "2026-08-20T17:01:37.0").
+
+    `datetime.fromisoformat` refuse un nombre de décimales != 3/6 selon la version de Python
+    (le "0" à une seule décimale ici fait échouer le parsing sur certaines versions) —
+    `strptime` avec `%f` est plus tolérant sur le nombre de chiffres fournis.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%f")
+    except ValueError:
+        return None
 
 
 def _pool_length_m(pool_length: Any, unit: Any) -> float | None:

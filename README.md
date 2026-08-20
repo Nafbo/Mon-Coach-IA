@@ -236,6 +236,7 @@ terminée sont immuables).
 |---|---|
 | `garmin_get_activity_weather` | Météo au moment d'une activité donnée (`activity_id`) |
 | `garmin_get_activity_details` | Séries FC / allure / dénivelé alignées sur un axe temps commun |
+| `garmin_get_swim_splits` | Longueurs de piscine d'une activité de nage (allure/FC/SWOLF par longueur) — `pace_min_per_km` de `garmin_get_activity_details` est toujours `null` en piscine, ce tool comble ce manque |
 
 ### Garmin — séances structurées (écriture)
 
@@ -342,6 +343,31 @@ Plusieurs tools s'écartent du schéma initialement envisagé, validés en condi
 - **`garmin_delete_workout`** : wrapper fin de `GarminClient.delete_workout`, ajouté pour le
   nettoyage de séances de test. Validé en conditions réelles (suppression confirmée via une
   relecture de `get_scheduled_workouts`).
+- **`garmin_get_swim_splits`** (ajouté après-coup, hors des tools ci-dessus) : `pace_min_per_km`
+  de `garmin_get_activity_details` est toujours `null` sur une activité de piscine
+  (`lap_swimming`) — normal, ce endpoint s'appuie sur le flux GPS/vitesse continue, absent en
+  piscine (Garmin calcule l'allure natation par longueur, pas en continu). Validé contre un
+  vrai compte :
+  - Deux méthodes `garminconnect` candidates testées : `get_activity_typed_splits` renvoie une
+    liste vide pour la nage (`"splits": []`) — c'est **`get_activity_splits`** qui contient les
+    données par longueur (`lapDTOs[].lengthDTOs[]`).
+  - `lengthIndex` est déjà **global sur toute l'activité** (pas remis à 1 à chaque lap/groupe de
+    longueurs) — réutilisé tel quel comme `length_idx`. Vérifié sur une activité de 72
+    longueurs réparties sur 4 laps (index 1-21, 22-40, 41-60, 61-72).
+  - Somme des `distance_m` de toutes les longueurs = distance totale de l'activité à l'exacte
+    (1800.0 m testés) — cohérence confirmée.
+  - `start_s` (secondes écoulées depuis le début de l'activité) dérivé de `startTimeGMT` de
+    chaque longueur par différence avec la première ; strictement croissant sur l'activité de
+    test, y compris à travers les pauses entre laps.
+  - `pace_min_per_100m` est en **minutes décimales** (ex. `1.74` = 1,74 min, pas "1 min 74"),
+    convention déjà utilisée ailleurs dans le code (`allure_moyenne_min_km`) mais peu lisible
+    telle quelle pour un affichage. Ajout de `pace_min_sec_per_100m` (`_format_pace_mm_ss`,
+    ex. `"1:44"`) en complément — le champ décimal reste disponible pour tout calcul/tri.
+  - **Non vérifié** : le comportement pour une activité en eau libre
+    (`open_water_swimming`, pas de mur pour marquer les longueurs) — aucune activité de ce
+    type disponible au moment de l'implémentation. Le code retourne une liste vide plutôt
+    qu'une exception dès que `lapDTOs`/`lengthDTOs` est absent ou vide, ce qui devrait couvrir
+    ce cas, mais reste une hypothèse à confirmer contre une vraie activité eau libre.
 
 ## Limites connues
 
