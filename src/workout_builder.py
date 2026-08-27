@@ -86,7 +86,11 @@ _BLOCK_STEP_TYPES: dict[str, dict[str, Any]] = {
     "interval": _STEP_TYPE_INTERVAL,
     "recovery": _STEP_TYPE_RECOVERY,
 }
-_CONDITION_TYPE_DISTANCE = 1
+# DISTANCE=3 et non 1 : `garminconnect.workout.ConditionType.DISTANCE` vaut 1 dans la lib
+# installée, mais l'API Garmin réelle traite 1 comme "lap.button" (fin manuelle) — un step
+# borné en distance envoyé avec conditionTypeId=1 s'affichait comme "Appui sur touche Lap"
+# sur l'app/montre au lieu de la distance cible. 3 est la valeur correcte côté serveur.
+_CONDITION_TYPE_DISTANCE = 3
 _CONDITION_TYPE_TIME = 2
 
 # Clés reconnues au niveau racine de `structure` — toute autre clé lève une erreur explicite

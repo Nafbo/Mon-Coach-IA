@@ -215,6 +215,9 @@ def test_build_workout_block_step_distance_based() -> None:
 
     repeat_group = payload["workoutSegments"][0]["workoutSteps"][0]
     interval_step = repeat_group["workoutSteps"][0]
+    # conditionTypeId=3, pas 1 : côté API Garmin réelle, 1 signifie "lap.button" (fin
+    # manuelle) et non "distance" — cf. commentaire sur _CONDITION_TYPE_DISTANCE.
+    assert interval_step["endCondition"]["conditionTypeId"] == 3
     assert interval_step["endCondition"]["conditionTypeKey"] == "distance"
     assert interval_step["endConditionValue"] == 400
 
