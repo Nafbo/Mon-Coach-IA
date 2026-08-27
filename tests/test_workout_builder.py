@@ -200,6 +200,75 @@ def test_build_workout_rejects_unknown_top_level_keys(bad_key: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Validation stricte des clés imbriquées (bloc, step de bloc, warmup/cooldown, target) —
+# même classe de bug que ci-dessus mais un niveau plus bas : un nom de clé de cible mal
+# orthographié (ex. `target_pace_min_per_km` au lieu de `target`) était silencieusement
+# ignoré, l'allure cible n'apparaissait jamais sur la montre sans aucune erreur.
+# ---------------------------------------------------------------------------
+
+
+def test_build_workout_rejects_unknown_key_in_block_step() -> None:
+    structure = {
+        "discipline": "course",
+        "blocks": [
+            {
+                "repeat": 1,
+                "steps": [
+                    {
+                        "type": "interval",
+                        "distance_m": 400,
+                        "target_pace_min_per_km": "3:55",
+                        "target_pace_max_per_km": "4:00",
+                    }
+                ],
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="target_pace_min_per_km"):
+        build_workout(structure)
+
+
+def test_build_workout_rejects_unknown_key_in_block() -> None:
+    structure = {
+        "discipline": "course",
+        "blocks": [{"repeat": 1, "steps": [{"type": "interval", "duration_sec": 60}], "intensity": "high"}],
+    }
+
+    with pytest.raises(ValueError, match="intensity"):
+        build_workout(structure)
+
+
+@pytest.mark.parametrize("segment", ["warmup", "cooldown"])
+def test_build_workout_rejects_unknown_key_in_warmup_cooldown(segment: str) -> None:
+    structure = {"discipline": "course", segment: {"duration_sec": 600, "pace": "5:00"}}
+
+    with pytest.raises(ValueError, match="pace"):
+        build_workout(structure)
+
+
+def test_build_workout_rejects_unknown_key_in_target() -> None:
+    structure = {
+        "discipline": "course",
+        "blocks": [
+            {
+                "repeat": 1,
+                "steps": [
+                    {
+                        "type": "interval",
+                        "duration_sec": 60,
+                        "target": {"type": "pace_min_per_km", "low": 3.5, "high": 4.0, "unit": "min_per_km"},
+                    }
+                ],
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="unit"):
+        build_workout(structure)
+
+
+# ---------------------------------------------------------------------------
 # Steps de bloc en distance (interval/recovery bornés en mètres, pas en secondes) —
 # nécessaire pour un fractionné du type "8x400m", pas exprimable en duration_sec seul.
 # ---------------------------------------------------------------------------

@@ -93,10 +93,25 @@ _BLOCK_STEP_TYPES: dict[str, dict[str, Any]] = {
 _CONDITION_TYPE_DISTANCE = 3
 _CONDITION_TYPE_TIME = 2
 
-# Clés reconnues au niveau racine de `structure` — toute autre clé lève une erreur explicite
+# Clés reconnues à chaque niveau de `structure` — toute autre clé lève une erreur explicite
 # (cf. docstring du module : c'est le fix d'un bug où une clé mal nommée pour le bloc de
-# fractionné était silencieusement ignorée, sans aucune erreur).
+# fractionné était silencieusement ignorée, sans aucune erreur ; propagé à tous les niveaux
+# imbriqués après un incident similaire où `target_pace_min_per_km` — au lieu de la clé
+# `target` attendue — était ignoré en silence, empêchant l'allure cible de remonter sur la montre).
 _VALID_STRUCTURE_KEYS = {"discipline", "warmup", "blocks", "cooldown"}
+_VALID_BLOCK_KEYS = {"repeat", "steps"}
+_VALID_BLOCK_STEP_KEYS = {"type", "duration_sec", "distance_m", "target"}
+_VALID_TIME_STEP_KEYS = {"duration_sec", "target"}
+_VALID_TARGET_KEYS = {"type", "low", "high"}
+
+
+def _validate_keys(d: dict[str, Any], valid_keys: set[str], context: str) -> None:
+    unknown_keys = set(d) - valid_keys
+    if unknown_keys:
+        raise ValueError(
+            f"Clé(s) non reconnue(s) dans {context} : {sorted(unknown_keys)} — clés attendues : "
+            f"{sorted(valid_keys)}"
+        )
 
 _PLACEHOLDER_WORKOUT_NAME = "Séance structurée"
 
@@ -120,6 +135,7 @@ def _build_target(target: dict[str, Any] | None) -> dict[str, Any]:
             }
         }
 
+    _validate_keys(target, _VALID_TARGET_KEYS, "target")
     target_type = target["type"]
     low = target["low"]
     high = target["high"]
@@ -171,6 +187,7 @@ def _build_time_step(creator, duration_sec: float, step_order: int, target: dict
 def _build_block_step(raw_step: dict[str, Any], step_order: int) -> ExecutableStep:
     """Pour un step interval/recovery à l'intérieur d'un bloc : borné en temps
     (`duration_sec`) OU en distance (`distance_m`), exactement l'un des deux."""
+    _validate_keys(raw_step, _VALID_BLOCK_STEP_KEYS, "step de bloc")
     step_type_key = raw_step["type"]
     step_type = _BLOCK_STEP_TYPES.get(step_type_key)
     if step_type is None:
@@ -269,10 +286,12 @@ def build_workout(structure: dict[str, Any]) -> dict[str, Any]:
 
     warmup = structure.get("warmup")
     if warmup:
+        _validate_keys(warmup, _VALID_TIME_STEP_KEYS, "warmup")
         steps.append(_build_time_step(create_warmup_step, warmup["duration_sec"], order, warmup.get("target")))
         order += 1
 
     for block in structure.get("blocks", []):
+        _validate_keys(block, _VALID_BLOCK_KEYS, "block")
         block_steps: list[ExecutableStep] = []
         for raw_step in block.get("steps", []):
             block_steps.append(_build_block_step(raw_step, order))
@@ -284,6 +303,7 @@ def build_workout(structure: dict[str, Any]) -> dict[str, Any]:
 
     cooldown = structure.get("cooldown")
     if cooldown:
+        _validate_keys(cooldown, _VALID_TIME_STEP_KEYS, "cooldown")
         steps.append(_build_time_step(create_cooldown_step, cooldown["duration_sec"], order, cooldown.get("target")))
         order += 1
 
