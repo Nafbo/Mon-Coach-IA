@@ -74,7 +74,12 @@ _SPORT_TYPE: dict[str, dict[str, Any]] = {
 _TARGET_TYPE_NO_TARGET = 1
 _TARGET_TYPE_POWER_ZONE = 2
 _TARGET_TYPE_HEART_RATE_ZONE = 4
-_TARGET_TYPE_SPEED_ZONE = 5
+# PACE_ZONE=6 et non SPEED_ZONE=5 : `garminconnect.workout.TargetType` n'a pas d'attribut PACE
+# (seulement OPEN=6, qui n'est pas ce qu'on veut), mais côté API Garmin réelle, un target de
+# course borné en allure doit utiliser workoutTargetTypeId=6/"pace.zone" pour que l'app/montre
+# affiche le résultat en min/km — 5/"speed.zone" l'affiche en km/h. Les bornes restent en m/s et
+# le sens de l'inversion low/high est inchangé, seul le type de cible change.
+_TARGET_TYPE_PACE_ZONE = 6
 
 # Idem pour les types de step et de condition de fin : construits à la main pour les steps de
 # bloc (interval/recovery) plutôt que via create_interval_step/create_recovery_step, qui ne
@@ -145,8 +150,8 @@ def _build_target(target: dict[str, Any] | None) -> dict[str, Any]:
         value_one = 1000 / (high * 60)  # allure la plus lente -> vitesse la plus basse
         value_two = 1000 / (low * 60)  # allure la plus rapide -> vitesse la plus haute
         target_type_dict = {
-            "workoutTargetTypeId": _TARGET_TYPE_SPEED_ZONE,
-            "workoutTargetTypeKey": "speed.zone",
+            "workoutTargetTypeId": _TARGET_TYPE_PACE_ZONE,
+            "workoutTargetTypeKey": "pace.zone",
             "displayOrder": 1,
         }
     elif target_type == "power_watts":

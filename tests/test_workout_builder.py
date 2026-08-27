@@ -49,6 +49,11 @@ def test_build_target_pace_low_maps_to_target_value_two() -> None:
     pas targetValueOne — piège explicitement signalé dans le brief."""
     result = _build_target({"type": "pace_min_per_km", "low": 3.33, "high": 3.5})
 
+    # workoutTargetTypeId=6/"pace.zone", pas 5/"speed.zone" : c'est ce qui fait afficher le
+    # résultat en min/km plutôt qu'en km/h sur l'app/montre (cf. commentaire sur
+    # _TARGET_TYPE_PACE_ZONE) — les bornes m/s et leur sens restent identiques dans les deux cas.
+    assert result["targetType"]["workoutTargetTypeId"] == 6
+    assert result["targetType"]["workoutTargetTypeKey"] == "pace.zone"
     assert result["targetValueOne"] < result["targetValueTwo"]
     # low=3.33 (rapide) -> vitesse haute -> targetValueTwo ; high=3.5 (lent) -> targetValueOne
     expected_value_two = round(1000 / (3.33 * 60), 3)
@@ -136,7 +141,7 @@ def test_build_workout_course_step_structure() -> None:
     interval_step, recovery_step = repeat_group["workoutSteps"]
     assert interval_step["stepType"]["stepTypeKey"] == "interval"
     assert interval_step["endConditionValue"] == 90
-    assert interval_step["targetType"]["workoutTargetTypeKey"] == "speed.zone"
+    assert interval_step["targetType"]["workoutTargetTypeKey"] == "pace.zone"
     assert interval_step["targetValueOne"] < interval_step["targetValueTwo"]
     assert recovery_step["stepType"]["stepTypeKey"] == "recovery"
     assert "targetValueOne" not in recovery_step
@@ -342,7 +347,7 @@ def test_build_workout_real_scenario_8x400m() -> None:
     interval_step, recovery_step = repeat_group["workoutSteps"]
     assert interval_step["endCondition"]["conditionTypeKey"] == "distance"
     assert interval_step["endConditionValue"] == 400
-    assert interval_step["targetType"]["workoutTargetTypeKey"] == "speed.zone"
+    assert interval_step["targetType"]["workoutTargetTypeKey"] == "pace.zone"
     assert recovery_step["endCondition"]["conditionTypeKey"] == "distance"
     assert recovery_step["endConditionValue"] == 200
     assert top_steps[2]["stepType"]["stepTypeKey"] == "cooldown"
