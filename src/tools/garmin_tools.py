@@ -288,6 +288,62 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
     async def garmin_push_workout(
         date: str, name: str, structure: dict[str, Any], dry_run: bool = True
     ) -> dict[str, Any]:
+        """Construit et programme une séance structurée (course ou vélo) sur la montre Garmin.
+
+        `structure` (clés reconnues au niveau racine : `discipline`, `warmup`, `blocks`,
+        `cooldown` — toute autre clé, ex. `intervals`/`repeats`/`repeat`/`steps`/`main`,
+        renvoie une erreur explicite plutôt que d'être silencieusement ignorée) :
+
+            {
+              "discipline": "course" | "velo",
+              "warmup":   {"duration_sec": <float>, "target": <target|absent>},   # optionnel
+              "blocks": [                                                          # optionnel
+                {
+                  "repeat": <int, defaut 1>,
+                  "steps": [
+                    {
+                      "type": "interval" | "recovery",
+                      "duration_sec": <float>,   # exactement l'un des deux :
+                      "distance_m": <float>,     # duration_sec OU distance_m, pas les deux
+                      "target": <target|absent>,
+                    },
+                    ...
+                  ],
+                },
+                ...
+              ],
+              "cooldown": {"duration_sec": <float>, "target": <target|absent>},   # optionnel
+            }
+
+        `target` (optionnel, sur warmup/cooldown/n'importe quel step de bloc) :
+            {"type": "pace_min_per_km" | "power_watts" | "hr_bpm", "low": <float>, "high": <float>}
+
+        Exemple — fractionné course 8x400m à 3:55-4:00/km, récup 200m trot, warmup 15min,
+        cooldown 10min :
+
+            {
+              "discipline": "course",
+              "warmup": {"duration_sec": 900},
+              "blocks": [
+                {
+                  "repeat": 8,
+                  "steps": [
+                    {"type": "interval", "distance_m": 400,
+                     "target": {"type": "pace_min_per_km", "low": 3.917, "high": 4.0}},
+                    {"type": "recovery", "distance_m": 200}
+                  ]
+                }
+              ],
+              "cooldown": {"duration_sec": 600}
+            }
+
+        `warmup`/`cooldown` sont toujours bornés en temps (`duration_sec` obligatoire). Les
+        steps `interval`/`recovery` à l'intérieur d'un bloc peuvent être bornés en temps OU en
+        distance.
+
+        `dry_run=True` (défaut) : construit le payload sans appel d'écriture réel, à inspecter
+        avant tout envoi réel avec `dry_run=False`.
+        """
         try:
             payload = build_workout(structure)
         except (KeyError, ValueError) as exc:

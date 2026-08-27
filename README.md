@@ -340,6 +340,24 @@ Plusieurs tools s'écartent du schéma initialement envisagé, validés en condi
     protocole Garmin, pas un choix de `garminconnect`). `src/workout_builder.py` n'importe donc
     plus `TargetType` et utilise directement ces entiers. Détails de l'incident et procédure
     pour l'éviter à l'avenir : cf. [Mise à jour en production](#mise-à-jour-en-production).
+  - **Bug trouvé en usage réel** : le bloc de fractionné (`blocks`) était silencieusement
+    ignoré si la clé fournie ne s'appelait pas exactement `blocks` — `intervals`, `repeats`,
+    `repeat`, `steps` (racine), `main`... disparaissaient sans la moindre erreur, laissant un
+    payload à 2 steps (warmup + cooldown) au lieu de 3. Cause : `structure.get("blocks", [])`
+    avec un défaut silencieux, sans validation des clés inconnues. `build_workout` refuse
+    désormais toute clé racine hors de `{"discipline", "warmup", "blocks", "cooldown"}` avec
+    une erreur explicite listant les clés attendues. Root cause plus profonde : le tool
+    `garmin_push_workout` n'exposait aucun schéma pour `structure` (`dict[str, Any]` opaque),
+    obligeant à deviner à l'aveugle — corrigé en documentant le schéma complet dans le
+    docstring du tool (visible par le modèle appelant avant même d'essayer).
+  - **Limite corrigée dans la foulée** : les steps `interval`/`recovery` d'un bloc ne
+    supportaient que `duration_sec` (bornage en temps), pas `distance_m` — un fractionné du
+    type "8x400m" n'était donc pas exprimable du tout, même avec la bonne clé `blocks`.
+    `garminconnect.workout` n'a pas de `create_distance_interval_step` dans la version locale
+    (0.3.2) ; construction manuelle de l'`ExecutableStep` avec `conditionTypeId` distance (`1`,
+    stable entre versions comme les autres IDs numériques du protocole) plutôt que d'utiliser
+    ce helper. `warmup`/`cooldown` restent bornés en temps uniquement (les helpers
+    correspondants ne supportent que ça).
 - **`garmin_delete_workout`** : wrapper fin de `GarminClient.delete_workout`, ajouté pour le
   nettoyage de séances de test. Validé en conditions réelles (suppression confirmée via une
   relecture de `get_scheduled_workouts`).

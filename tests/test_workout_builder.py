@@ -183,3 +183,94 @@ def test_build_workout_block_without_repeat_defaults_to_one_iteration() -> None:
     repeat_group = payload["workoutSegments"][0]["workoutSteps"][0]
     assert repeat_group["numberOfIterations"] == 1
     assert payload["estimatedDurationInSecs"] == 60
+
+
+# ---------------------------------------------------------------------------
+# Validation stricte des clés racine — bug où intervals/repeats/repeat/steps/main
+# étaient silencieusement ignorées sans erreur (le fractionné disparaissait du payload).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_key", ["intervals", "repeats", "repeat", "steps", "main"])
+def test_build_workout_rejects_unknown_top_level_keys(bad_key: str) -> None:
+    structure = {"discipline": "course", "warmup": {"duration_sec": 60}, bad_key: [{"repeat": 8}]}
+
+    with pytest.raises(ValueError, match=bad_key):
+        build_workout(structure)
+
+
+# ---------------------------------------------------------------------------
+# Steps de bloc en distance (interval/recovery bornés en mètres, pas en secondes) —
+# nécessaire pour un fractionné du type "8x400m", pas exprimable en duration_sec seul.
+# ---------------------------------------------------------------------------
+
+
+def test_build_workout_block_step_distance_based() -> None:
+    structure = {
+        "discipline": "course",
+        "blocks": [{"repeat": 1, "steps": [{"type": "interval", "distance_m": 400}]}],
+    }
+
+    payload = build_workout(structure)
+
+    repeat_group = payload["workoutSegments"][0]["workoutSteps"][0]
+    interval_step = repeat_group["workoutSteps"][0]
+    assert interval_step["endCondition"]["conditionTypeKey"] == "distance"
+    assert interval_step["endConditionValue"] == 400
+
+
+def test_build_workout_block_step_requires_exactly_one_of_duration_or_distance() -> None:
+    both = {
+        "discipline": "course",
+        "blocks": [{"steps": [{"type": "interval", "duration_sec": 60, "distance_m": 400}]}],
+    }
+    neither = {
+        "discipline": "course",
+        "blocks": [{"steps": [{"type": "interval"}]}],
+    }
+
+    with pytest.raises(ValueError):
+        build_workout(both)
+    with pytest.raises(ValueError):
+        build_workout(neither)
+
+
+def test_build_workout_real_scenario_8x400m() -> None:
+    """Séance réelle rapportée en bug : 8x400m à 3:55-4:00/km, récup 200m trot,
+    warmup 15min, cooldown 10min — doit produire 3 steps top-level (warmup, repeat×8,
+    cooldown), le repeat group contenant bien les 2 sous-steps."""
+    structure = {
+        "discipline": "course",
+        "warmup": {"duration_sec": 900},
+        "blocks": [
+            {
+                "repeat": 8,
+                "steps": [
+                    {
+                        "type": "interval",
+                        "distance_m": 400,
+                        "target": {"type": "pace_min_per_km", "low": 3.917, "high": 4.0},
+                    },
+                    {"type": "recovery", "distance_m": 200},
+                ],
+            }
+        ],
+        "cooldown": {"duration_sec": 600},
+    }
+
+    payload = build_workout(structure)
+    top_steps = payload["workoutSegments"][0]["workoutSteps"]
+
+    assert len(top_steps) == 3
+    assert top_steps[0]["stepType"]["stepTypeKey"] == "warmup"
+    repeat_group = top_steps[1]
+    assert repeat_group["type"] == "RepeatGroupDTO"
+    assert repeat_group["numberOfIterations"] == 8
+    assert len(repeat_group["workoutSteps"]) == 2
+    interval_step, recovery_step = repeat_group["workoutSteps"]
+    assert interval_step["endCondition"]["conditionTypeKey"] == "distance"
+    assert interval_step["endConditionValue"] == 400
+    assert interval_step["targetType"]["workoutTargetTypeKey"] == "speed.zone"
+    assert recovery_step["endCondition"]["conditionTypeKey"] == "distance"
+    assert recovery_step["endConditionValue"] == 200
+    assert top_steps[2]["stepType"]["stepTypeKey"] == "cooldown"
