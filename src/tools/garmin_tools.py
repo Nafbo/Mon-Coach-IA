@@ -71,22 +71,25 @@ def _iter_scheduled_entries(raw: Any) -> list[dict[str, Any]]:
     return []
 
 
-def _find_duplicate_scheduled_workout(raw: Any, *, name: str, date_str: str) -> dict[str, Any] | None:
-    for entry in _iter_scheduled_entries(raw):
-        # Confirmé sur un vrai compte : "calendarItems" mélange activités déjà réalisées
-        # (itemType="activity") et séances programmées — une activité passée ne doit
-        # jamais compter comme "déjà programmée" pour la détection anti-doublon.
-        if entry.get("itemType") == "activity":
-            continue
-        entry_name = entry.get("title") or entry.get("workoutName") or entry.get("name")
-        entry_date = entry.get("date") or entry.get("calendarDate")
-        if entry_name == name and entry_date == date_str:
-            workout_id = entry.get("workoutId") or entry.get("id")
-            return {"workout_id": workout_id, "scheduled_date": entry_date}
-    return None
+# Valeurs d'`itemType` confirmées sur un vrai compte (cf. README "Limites connues") :
+# "workout" = séance structurée programmée (créée via garmin_push_workout, seule qui nous
+# intéresse ici) ; "activity" = activité déjà réalisée ; "event" = échéance/course objectif
+# (ex. "Odyssea") ; "nap" = repère de calendrier sans rapport (sommeil). Liste blanche plutôt
+# que liste noire ("!= activity" uniquement, comme avant) : plus sûr si Garmin ajoute d'autres
+# itemType à l'avenir, et corrige au passage un faux négatif potentiel de anti-doublon contre
+# "event"/"nap" (jamais déclenché en pratique, mais latent).
+_SCHEDULED_WORKOUT_ITEM_TYPE = "workout"
+
+
+def _iter_pushed_workout_entries(raw: Any) -> list[dict[str, Any]]:
+    return [e for e in _iter_scheduled_entries(raw) if e.get("itemType") == _SCHEDULED_WORKOUT_ITEM_TYPE]
 
 
 def _extract_workout_id(raw: Any) -> int | None:
+    # "workoutId" avant "id" : confirmé sur un vrai compte que ce sont deux identifiants
+    # différents sur une entrée de calendrier — "id" est l'occurrence programmée, "workoutId"
+    # le template (celui attendu par garmin_delete_workout/schedule_workout). Sur la réponse
+    # d'upload_workout (pas une entrée de calendrier), seul "workoutId" existe.
     if isinstance(raw, dict):
         value = raw.get("workoutId") or raw.get("id")
         if isinstance(value, (int, str)):
@@ -95,6 +98,45 @@ def _extract_workout_id(raw: Any) -> int | None:
             except (TypeError, ValueError):
                 return None
     return None
+
+
+def _find_duplicate_scheduled_workout(raw: Any, *, name: str, date_str: str) -> dict[str, Any] | None:
+    for entry in _iter_pushed_workout_entries(raw):
+        entry_name = entry.get("title") or entry.get("workoutName") or entry.get("name")
+        entry_date = entry.get("date") or entry.get("calendarDate")
+        if entry_name == name and entry_date == date_str:
+            return {"workout_id": _extract_workout_id(entry), "scheduled_date": entry_date}
+    return None
+
+
+# sportTypeKey observé sur les entrées de calendrier itemType="workout" (confirmé sur un vrai
+# compte) : reprend exactement les clés que build_workout écrit lui-même (cf. _SPORT_TYPE dans
+# src/workout_builder.py) — une clé absente de cette table est retournée telle quelle plutôt
+# que de lever une erreur (même tolérance que ACTIVITY_TYPE_MAP dans src/garmin_client.py).
+_SPORT_TYPE_KEY_TO_DISCIPLINE = {"running": "course", "cycling": "velo"}
+
+
+def _scheduled_workout_summary(entry: dict[str, Any]) -> dict[str, Any]:
+    sport_type_key = entry.get("sportTypeKey")
+    return {
+        "workout_id": _extract_workout_id(entry),
+        "name": entry.get("title") or entry.get("workoutName") or entry.get("name"),
+        "date": entry.get("date") or entry.get("calendarDate"),
+        "discipline": _SPORT_TYPE_KEY_TO_DISCIPLINE.get(sport_type_key, sport_type_key),
+    }
+
+
+def _month_range(start: date, end: date) -> list[tuple[int, int]]:
+    """Liste des (year, month) couvrant [start, end] inclus — get_scheduled_workouts
+    n'interroge Garmin que mois par mois, pas de plage de dates directe côté API."""
+    months = []
+    year, month = start.year, start.month
+    while (year, month) <= (end.year, end.month):
+        months.append((year, month))
+        month += 1
+        if month > 12:
+            month, year = 1, year + 1
+    return months
 
 
 def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[str, Callable[..., Any]]:
@@ -396,6 +438,56 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
             "workout_id": workout_id,
         }
 
+    async def garmin_list_workouts(start_date: str | None = None, end_date: str | None = None) -> dict[str, Any]:
+        """Liste les séances structurées actuellement programmées sur le calendrier Garmin
+        (celles créées via `garmin_push_workout`) — pas la bibliothèque d'exercices Garmin en
+        général.
+
+        Chaque entrée : `workout_id` (utilisable tel quel avec `garmin_delete_workout`),
+        `name`, `date` (YYYY-MM-DD), `discipline` (`course`/`velo`/clé Garmin brute si
+        inconnue).
+
+        Précision Garmin "workout" vs "scheduled workout" : un `workout` est le
+        template/définition de la séance (identifié par `workoutId`) ; un `scheduled workout`
+        est son occurrence sur le calendrier à une date donnée (identifiée par un `id` de
+        calendrier différent). `garmin_delete_workout` supprime le *template* — ce qui retire
+        aussi son occurrence programmée. `workout_id` ci-dessous est bien le `workoutId` du
+        template, pas l'`id` de l'occurrence de calendrier.
+
+        `start_date`/`end_date` (YYYY-MM-DD, optionnels) filtrent sur la date programmée. Sans
+        filtre : fenêtre par défaut de J-30 à J+60 (l'API Garmin n'expose le calendrier que
+        mois par mois — un historique complet illimité n'est pas interrogeable en un seul
+        appel).
+        """
+        try:
+            start = _parse_date(start_date) if start_date else today_paris() - timedelta(days=30)
+            end = _parse_date(end_date) if end_date else today_paris() + timedelta(days=60)
+        except ValueError:
+            return {"error": True, "message": f"Date invalide : {start_date or end_date}"}
+
+        if start > end:
+            return {"error": True, "message": f"start_date ({start}) postérieure à end_date ({end})"}
+
+        workouts: dict[int, dict[str, Any]] = {}
+        for year, month in _month_range(start, end):
+            try:
+                raw = client.get_scheduled_workouts(year, month)
+            except Exception as exc:
+                return {"error": True, "message": _garmin_error_message(exc)}
+            for entry in _iter_pushed_workout_entries(raw):
+                entry_date_str = entry.get("date") or entry.get("calendarDate")
+                try:
+                    entry_date = date.fromisoformat(entry_date_str) if entry_date_str else None
+                except ValueError:
+                    entry_date = None
+                if entry_date is None or not (start <= entry_date <= end):
+                    continue
+                summary = _scheduled_workout_summary(entry)
+                if summary["workout_id"] is not None:
+                    workouts[summary["workout_id"]] = summary
+
+        return {"workouts": sorted(workouts.values(), key=lambda w: w["date"] or "")}
+
     async def garmin_delete_workout(workout_id: int) -> dict[str, Any]:
         try:
             client.delete_workout(workout_id)
@@ -419,5 +511,6 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         "garmin_get_activity_details": garmin_get_activity_details,
         "garmin_get_swim_splits": garmin_get_swim_splits,
         "garmin_push_workout": garmin_push_workout,
+        "garmin_list_workouts": garmin_list_workouts,
         "garmin_delete_workout": garmin_delete_workout,
     }

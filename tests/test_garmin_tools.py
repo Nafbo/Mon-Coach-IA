@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import date, datetime, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 from garminconnect import (
@@ -968,6 +968,141 @@ async def test_push_workout_invalid_structure_returns_error(tools: dict, fake_cl
 
     assert result["error"] is True
     fake_client.upload_workout.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tool garmin_list_workouts
+# ---------------------------------------------------------------------------
+
+
+async def test_list_workouts_default_window_queries_expected_months(tools: dict, fake_client: MagicMock) -> None:
+    # frozen_today = 2026-08-05 -> fenêtre par défaut J-30 (2026-07-06) à J+60 (2026-10-04),
+    # donc les mois juillet à octobre 2026 inclus.
+    fake_client.get_scheduled_workouts.return_value = {"calendarItems": []}
+
+    result = await tools["garmin_list_workouts"]()
+
+    assert result == {"workouts": []}
+    fake_client.get_scheduled_workouts.assert_has_calls(
+        [call(2026, 7), call(2026, 8), call(2026, 9), call(2026, 10)], any_order=False
+    )
+    assert fake_client.get_scheduled_workouts.call_count == 4
+
+
+async def test_list_workouts_returns_only_pushed_workouts(tools: dict, fake_client: MagicMock) -> None:
+    # Forme réelle observée sur un vrai compte (cf. README) : "calendarItems" mélange
+    # itemType="workout" (séance poussée via garmin_push_workout, à garder), "activity"
+    # (déjà réalisée), "event" (échéance/course objectif) et "nap" — seul "workout" doit
+    # remonter dans garmin_list_workouts.
+    fake_client.get_scheduled_workouts.return_value = {
+        "calendarItems": [
+            {
+                "itemType": "workout",
+                "title": "24/08 - Fractionné VMA 6x400",
+                "date": "2026-08-24",
+                "workoutId": 111,
+                "sportTypeKey": "running",
+            },
+            {"itemType": "activity", "title": "Paris Course à pied", "date": "2026-08-20", "id": 999},
+            {"itemType": "event", "title": "Odyssea", "date": "2026-10-04", "id": 888},
+            {"itemType": "nap", "title": None, "date": "2026-08-10", "id": 777},
+        ]
+    }
+
+    result = await tools["garmin_list_workouts"]()
+
+    assert result == {
+        "workouts": [{"workout_id": 111, "name": "24/08 - Fractionné VMA 6x400", "date": "2026-08-24", "discipline": "course"}]
+    }
+
+
+async def test_list_workouts_uses_workout_id_not_calendar_entry_id(tools: dict, fake_client: MagicMock) -> None:
+    # Confirmé sur un vrai compte : "id" (occurrence de calendrier) et "workoutId" (template,
+    # celui attendu par garmin_delete_workout) sont deux nombres différents sur une même
+    # entrée — garmin_list_workouts doit renvoyer workoutId, jamais id.
+    fake_client.get_scheduled_workouts.return_value = {
+        "calendarItems": [
+            {
+                "itemType": "workout",
+                "id": 1758454357,
+                "workoutId": 1678656885,
+                "title": "TEST",
+                "date": "2026-08-25",
+                "sportTypeKey": "running",
+            }
+        ]
+    }
+
+    result = await tools["garmin_list_workouts"]()
+
+    assert result["workouts"][0]["workout_id"] == 1678656885
+
+
+async def test_list_workouts_maps_discipline_and_passes_through_unknown(
+    tools: dict, fake_client: MagicMock
+) -> None:
+    fake_client.get_scheduled_workouts.return_value = {
+        "calendarItems": [
+            {"itemType": "workout", "title": "Vélo", "date": "2026-08-10", "workoutId": 1, "sportTypeKey": "cycling"},
+            {"itemType": "workout", "title": "Autre", "date": "2026-08-11", "workoutId": 2, "sportTypeKey": "swimming"},
+        ]
+    }
+
+    result = await tools["garmin_list_workouts"]()
+
+    disciplines = {w["workout_id"]: w["discipline"] for w in result["workouts"]}
+    assert disciplines == {1: "velo", 2: "swimming"}
+
+
+async def test_list_workouts_filters_by_date_range(tools: dict, fake_client: MagicMock) -> None:
+    fake_client.get_scheduled_workouts.return_value = {
+        "calendarItems": [
+            {"itemType": "workout", "title": "Trop tôt", "date": "2026-08-01", "workoutId": 1, "sportTypeKey": "running"},
+            {"itemType": "workout", "title": "Dans la fenêtre", "date": "2026-08-15", "workoutId": 2, "sportTypeKey": "running"},
+            {"itemType": "workout", "title": "Trop tard", "date": "2026-08-31", "workoutId": 3, "sportTypeKey": "running"},
+        ]
+    }
+
+    result = await tools["garmin_list_workouts"](start_date="2026-08-10", end_date="2026-08-20")
+
+    assert [w["workout_id"] for w in result["workouts"]] == [2]
+    fake_client.get_scheduled_workouts.assert_called_once_with(2026, 8)
+
+
+async def test_list_workouts_sorted_by_date(tools: dict, fake_client: MagicMock) -> None:
+    fake_client.get_scheduled_workouts.return_value = {
+        "calendarItems": [
+            {"itemType": "workout", "title": "B", "date": "2026-08-20", "workoutId": 2, "sportTypeKey": "running"},
+            {"itemType": "workout", "title": "A", "date": "2026-08-10", "workoutId": 1, "sportTypeKey": "running"},
+        ]
+    }
+
+    result = await tools["garmin_list_workouts"]()
+
+    assert [w["date"] for w in result["workouts"]] == ["2026-08-10", "2026-08-20"]
+
+
+async def test_list_workouts_invalid_date_returns_error(tools: dict, fake_client: MagicMock) -> None:
+    result = await tools["garmin_list_workouts"](start_date="pas-une-date")
+
+    assert result["error"] is True
+    fake_client.get_scheduled_workouts.assert_not_called()
+
+
+async def test_list_workouts_start_after_end_returns_error(tools: dict, fake_client: MagicMock) -> None:
+    result = await tools["garmin_list_workouts"](start_date="2026-08-20", end_date="2026-08-10")
+
+    assert result["error"] is True
+    fake_client.get_scheduled_workouts.assert_not_called()
+
+
+async def test_list_workouts_error_handling(tools: dict, fake_client: MagicMock) -> None:
+    fake_client.get_scheduled_workouts.side_effect = GarminUnavailableError("Garmin Connect injoignable")
+
+    result = await tools["garmin_list_workouts"](start_date="2026-08-01", end_date="2026-08-31")
+
+    assert result["error"] is True
+    assert "injoignable" in result["message"]
 
 
 # ---------------------------------------------------------------------------

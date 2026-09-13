@@ -211,7 +211,7 @@ terminée sont immuables).
 
 ## Tools MCP exposés
 
-22 tools au total. Schémas d'input/output exacts dans le code (`src/tools/garmin_tools.py`,
+23 tools au total. Schémas d'input/output exacts dans le code (`src/tools/garmin_tools.py`,
 `src/tools/operational_tools.py`) — la liste ci-dessous donne le rôle de chacun.
 
 ### Garmin — données individuelles (cache 1h)
@@ -243,7 +243,8 @@ terminée sont immuables).
 | Tool | Rôle |
 |---|---|
 | `garmin_push_workout` | Construit et programme une séance structurée (course/vélo) sur la montre. `dry_run=True` par défaut — ne fait jamais d'appel d'écriture réel sans `dry_run=False` explicite. Anti-doublon + retry à la programmation |
-| `garmin_delete_workout` | Supprime un workout (nettoyage, ex. séance de test) |
+| `garmin_list_workouts` | Liste les séances programmées sur le calendrier (créées via `garmin_push_workout`), avec `workout_id`/`name`/`date`/`discipline`. Filtres `start_date`/`end_date` optionnels (sans filtre : fenêtre J-30/J+60) |
+| `garmin_delete_workout` | Supprime un workout (nettoyage, ex. séance de test) — supprime le *template*, pas seulement son occurrence de calendrier (cf. "Écarts volontaires" ci-dessous) |
 
 ### Opérationnel (plan de semaine, séances, feedback)
 
@@ -354,13 +355,41 @@ Plusieurs tools s'écartent du schéma initialement envisagé, validés en condi
     supportaient que `duration_sec` (bornage en temps), pas `distance_m` — un fractionné du
     type "8x400m" n'était donc pas exprimable du tout, même avec la bonne clé `blocks`.
     `garminconnect.workout` n'a pas de `create_distance_interval_step` dans la version locale
-    (0.3.2) ; construction manuelle de l'`ExecutableStep` avec `conditionTypeId` distance (`1`,
-    stable entre versions comme les autres IDs numériques du protocole) plutôt que d'utiliser
-    ce helper. `warmup`/`cooldown` restent bornés en temps uniquement (les helpers
-    correspondants ne supportent que ça).
+    (0.3.2) ; construction manuelle de l'`ExecutableStep` plutôt que d'utiliser ce helper.
+    `warmup`/`cooldown` restent bornés en temps uniquement (les helpers correspondants ne
+    supportent que ça).
+    - **Bug confirmé sur un vrai compte** : le `conditionTypeId` distance utilisé initialement
+      (`1`, recopié de `garminconnect.workout.ConditionType.DISTANCE`) n'est **pas** stable
+      côté protocole Garmin réel malgré la remarque ci-dessus sur `workoutTargetTypeId` — `1`
+      y désigne `lap.button` (fin manuelle) ; un step de distance envoyé avec cet id s'affichait
+      comme "Appui sur touche Lap" sur l'app/montre. Valeur correcte : `3`. `TargetType`
+      (bullet précédent) et `ConditionType` de `garminconnect` ne sont donc pas dignes de
+      confiance de la même façon — seul le premier a été vérifié stable, pas le second.
+    - **Fonctionnalité manquante confirmée après-coup** : la cible d'allure (`target.type ==
+      "pace_min_per_km"`) utilisait `workoutTargetTypeId=5`/`"speed.zone"`, qui affiche le
+      résultat en km/h sur l'app/montre. La valeur attendue pour un affichage en min/km est
+      `6`/`"pace.zone"` — absente de `garminconnect.workout.TargetType` (qui n'a que
+      `OPEN=6`), confirmée par recoupement externe plutôt que par la lib. Les bornes m/s et le
+      sens de l'inversion low/high restent identiques, seul le type de cible change.
 - **`garmin_delete_workout`** : wrapper fin de `GarminClient.delete_workout`, ajouté pour le
   nettoyage de séances de test. Validé en conditions réelles (suppression confirmée via une
-  relecture de `get_scheduled_workouts`).
+  relecture de `get_scheduled_workouts`). Supprime le *workout* (le template/la définition,
+  identifié par `workoutId`) — pas une occurrence de calendrier isolée (son propre id, exposé
+  par `garmin_list_workouts` comme `id` côté API mais jamais renvoyé par ce tool). Supprimer le
+  template retire aussi son occurrence programmée ; `garminconnect` expose séparément
+  `unschedule_workout` pour retirer une occurrence sans toucher au template, non wrappé ici
+  faute de besoin identifié.
+- **`garmin_list_workouts`** (ajouté après-coup) : construit sur `get_scheduled_workouts`
+  (même endpoint que l'anti-doublon de `garmin_push_workout`), pas sur `get_workouts`
+  (bibliothèque d'exercices générale, hors sujet ici). `calendarItems` contient en réalité
+  plusieurs `itemType` au-delà de `"activity"`/`"workout"` déjà connus : `"event"` (échéance/
+  course objectif, ex. "Odyssea") et `"nap"` (repère de calendrier sans rapport) ont été
+  observés sur un vrai compte — filtrage en liste blanche (`itemType == "workout"` uniquement)
+  plutôt qu'en liste noire, appliqué aussi rétroactivement à `_find_duplicate_scheduled_workout`
+  (même risque latent, jamais déclenché en pratique). `sportTypeKey` sur ces entrées
+  (`"running"`/`"cycling"`, confirmé) reprend exactement les clés que `build_workout` écrit
+  lui-même — mappé vers `course`/`velo` avec repli sur la valeur brute si clé inconnue (nage,
+  renfo : jamais poussés via `garmin_push_workout` à ce jour, non vérifiés).
 - **`garmin_get_swim_splits`** (ajouté après-coup, hors des tools ci-dessus) : `pace_min_per_km`
   de `garmin_get_activity_details` est toujours `null` sur une activité de piscine
   (`lap_swimming`) — normal, ce endpoint s'appuie sur le flux GPS/vitesse continue, absent en

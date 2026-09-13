@@ -490,6 +490,15 @@ class GarminClient:
         return self._call(self._garmin.get_scheduled_workouts, year, month)
 
     def delete_workout(self, workout_id: int | str) -> Any:
+        """Supprime le workout (le template/la définition de séance), pas une occurrence de
+        calendrier isolée : Garmin distingue "workout" (template, identifié par `workoutId`,
+        ce que `upload_workout`/`schedule_workout` manipulent) et "scheduled workout"
+        (occurrence programmée à une date, avec son propre id, supprimable seule via
+        `unschedule_workout` côté lib — non exposé ici, pas de besoin identifié). Supprimer le
+        template retire aussi son occurrence programmée. `workout_id` doit venir de
+        `upload_workout`/`garmin_push_workout` ou de `garmin_list_workouts` (champ
+        `workoutId` des entrées de calendrier), jamais du champ `id` d'une entrée de calendrier
+        (c'est l'id de l'occurrence, un nombre différent) — confirmé sur un vrai compte."""
         return self._call(self._garmin.delete_workout, workout_id)
 
     def get_intensity_minutes(self, week_start: date) -> dict[str, Any]:
