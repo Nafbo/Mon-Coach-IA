@@ -1401,7 +1401,8 @@ async def test_swim_splits_tool_cache_ignores_freshness_window(
 
     result = await tools["garmin_get_swim_splits"]("999")
 
-    assert result == {"status": "ok", "splits": [], "blocks": []}
+    assert result["splits"] == [] and result["blocks"] == []
+    assert result["status"] == "ok"
     fake_client.get_swim_splits.assert_not_called()
 
 

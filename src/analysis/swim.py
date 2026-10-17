@@ -66,7 +66,9 @@ def _reference(splits: list[dict[str, Any]], block: list[int], i: int) -> float 
 
 
 def annotate(splits: list[dict[str, Any]], rest_gap_s: float = REST_GAP_S) -> dict[str, Any]:
-    """Renvoie {"splits": [... + suspect, suspect_reason, block], "blocks": [...]}."""
+    """Renvoie {"splits": [... + suspect, suspect_reason, block, pace_mmss],
+    "blocks": [... + role, repos_avant_s, repos_apres_s], "totaux": {temps de nage, temps de
+    repos, temps total, distance}}."""
     blocks = group_blocks(splits, rest_gap_s)
     out_splits = [dict(s) for s in splits]
 
@@ -100,6 +102,8 @@ def annotate(splits: list[dict[str, Any]], rest_gap_s: float = REST_GAP_S) -> di
         pace = duration / distance * 100 / 60 if distance else None
         next_start = out_splits[blocks[n][0]].get("start_s") if n < len(blocks) else None
         end = _end_s(lengths[-1])
+        prev_end = _end_s(out_splits[blocks[n - 2][-1]]) if n > 1 else None
+        start = lengths[0].get("start_s")
         block_list.append(
             {
                 "n": n,
@@ -111,11 +115,37 @@ def annotate(splits: list[dict[str, Any]], rest_gap_s: float = REST_GAP_S) -> di
                 "duree_nage_s": round(duration, 1),
                 "allure_min_100m": round(pace, 2) if pace else None,
                 "allure_mmss": _mmss(pace),
+                "pace_min_per_100m": round(pace, 2) if pace else None,
+                "pace_mmss": _mmss(pace),
+                "role": _role(n, len(blocks)),
                 "fc_moy": round(st.mean(hrs)) if hrs else None,
                 "swolf_moy": round(st.mean(swolfs), 1) if swolfs else None,
                 "nages": strokes,
                 "nb_suspectes": sum(1 for x in lengths if x["suspect"]),
                 "repos_apres_s": round(next_start - end, 1) if next_start is not None and end is not None else None,
+                "repos_avant_s": (
+                    round(start - prev_end, 1) if start is not None and prev_end is not None else None
+                ),
             }
         )
-    return {"splits": out_splits, "blocks": block_list}
+    for length in out_splits:
+        length["pace_mmss"] = _mmss(length.get("pace_min_per_100m"))
+    swim_s = sum(x["duration_s"] for x in out_splits if isinstance(x.get("duration_s"), (int, float)))
+    rest_s = sum(b["repos_apres_s"] for b in block_list if b["repos_apres_s"] is not None)
+    totals = {
+        "temps_nage_s": round(swim_s, 1),
+        "temps_repos_s": round(rest_s, 1),
+        "temps_total_s": round(swim_s + rest_s, 1),
+        "distance_m": round(sum(b["distance_m"] for b in block_list)),
+    }
+    return {"splits": out_splits, "blocks": block_list, "totaux": totals}
+
+
+def _role(n: int, total: int) -> str:
+    """Rôle d'un bloc dans la séance : premier = échauffement, dernier = retour au calme,
+    les autres = séries (avec 1 ou 2 blocs : tout est "serie")."""
+    if total >= 3 and n == 1:
+        return "echauffement"
+    if total >= 3 and n == total:
+        return "retour_au_calme"
+    return "serie"

@@ -67,7 +67,9 @@ def test_p6_short_block_uses_session_reference() -> None:
 
 
 def test_p6_empty() -> None:
-    assert swim.annotate([]) == {"splits": [], "blocks": []}
+    result = swim.annotate([])
+    assert result["splits"] == [] and result["blocks"] == []
+    assert result["totaux"]["temps_nage_s"] == 0
 
 
 async def test_p6_tool_returns_blocks() -> None:

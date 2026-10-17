@@ -427,6 +427,9 @@ class GarminClient:
                     "denivele_m": _to_int(elevation_gain, default=None),
                     "allure_moyenne_min_km": allure_moyenne,
                     "allure_moyenne_mmss": _format_pace_mm_ss(allure_moyenne),
+                    # Alias normalisés (même valeur que allure_moyenne_*), présents pour la course.
+                    "pace_min_per_km": allure_moyenne,
+                    "pace_mmss": _format_pace_mm_ss(allure_moyenne),
                     "allure_rapide_min_km": allure_rapide,
                     "allure_rapide_mmss": _format_pace_mm_ss(allure_rapide),
                     "effet_entrainement": act.get("trainingEffectLabel"),
@@ -603,6 +606,7 @@ class GarminClient:
             "wind_speed_raw": _to_int(data.get("windSpeed"), default=None),
             "wind_gust_raw": _to_int(data.get("windGust"), default=None),
             "wind_speed_kmh": _round_or_none(wind_raw),
+            "wind_speed_unit": "km/h",
             # null = aucune rafale signalée par la station (pas une rafale nulle).
             "wind_gust_kmh": _round_or_none(gust_raw),
             "wind_direction_compass": data.get("windDirectionCompassPoint"),

@@ -260,8 +260,11 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         au réveil), `min` / `max` (niveaux extrêmes de la journée), `latest` + `latest_at`
         (dernier niveau mesuré et son horodatage), `charged` / `drained` (cumuls de points
         rechargés / consommés sur la journée, pas des niveaux), `value` (= `latest`, conservé
-        pour compatibilité). Niveaux sur 0-100. `status` : "ok" | "no_data" (aucun point
-        mesuré, valeurs null) | erreur."""
+        pour compatibilité). Niveaux sur 0-100. Heures (ISO Europe/Paris) : `min_at`,
+        `max_at`, `latest_at`, `at_wake_at` (fin de la nuit ; null si la nuit n'a pas été
+        enregistrée). `availability` : "ok" | "zero" (points tous à 0) | "empty".
+        `status` : "ok" | "no_data" (aucun point exploitable, valeurs null) | erreur
+        (`error_type`, `message`)."""
         try:
             target_date = _parse_date(date)
         except ValueError:
@@ -280,7 +283,10 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         """FC de repos (bpm) du jour (`date` YYYY-MM-DD, défaut aujourd'hui), avec
         `measured_on` (jour de la mesure), `last_sync_at` (dernière synchro montre prise en
         compte, ISO Europe/Paris) et `provisoire` (true pour le jour en cours : valeur encore
-        susceptible d'être recalculée). `status` : "ok" | "no_data" (`resting_hr` null) | erreur."""
+        susceptible d'être recalculée). Garmin ne date la FC de repos qu'au jour, sans heure :
+        `measured_on` + `last_sync_at` constituent l'horodatage disponible. `availability` :
+        "ok" | "zero" (valeur 0 renvoyée : non exploitable) | "empty". `status` : "ok" |
+        "no_data" (`resting_hr` null) | erreur (`error_type`, `message`)."""
         try:
             target_date = _parse_date(date)
         except ValueError:
@@ -296,7 +302,9 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
     async def garmin_get_sleep(date: str | None = None, force_refresh: bool = False) -> dict[str, Any]:
         """Nuit se terminant le jour `date` (YYYY-MM-DD, défaut aujourd'hui) : durées en
         minutes (totale, profond, léger, paradoxal, éveillé) et `score`. `status` : "ok" |
-        "no_data" (nuit non synchronisée : toutes les valeurs null, jamais 0) | erreur."""
+        "no_data" (nuit non synchronisée : toutes les valeurs null, jamais 0) | erreur
+        (`error_type`, `message`). `availability` : "ok" | "zero" (durée 0 renvoyée) |
+        "empty" (aucune nuit enregistrée)."""
         try:
             target_date = _parse_date(date)
         except ValueError:
@@ -388,8 +396,8 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
 
     async def garmin_get_activity_weather(activity_id: str) -> dict[str, Any]:
         """Météo d'une activité : températures en °C, `humidity_percent`, vent
-        `wind_speed_kmh` / `wind_gust_kmh` (km/h, unité native Garmin ; rafale null = aucune
-        rafale signalée), `wind_direction_compass`,
+        `wind_speed_kmh` / `wind_gust_kmh` (unité explicite dans `wind_speed_unit` = "km/h",
+        unité native Garmin ; rafale null = aucune rafale signalée), `wind_direction_compass`,
         `condition`, station (`station_name`, `station_id`, `station_distance_km` entre la
         station et le départ, `station_far` true au-delà de 15 km : mesure peu
         représentative). Les champs `*_raw` historiques sont conservés. Cache sans
@@ -527,15 +535,23 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         prévue des blocs en min/km décimales, ex. 4.0 = 4:00/km), `type` parmi
         "auto" | "fractionne" | "seuil" | "endurance".
 
-        Sortie (JSON compact) : `vue_ensemble` (durée, distance, allure, FC, bascule
-        effort/récup), `zones_fc` (% du temps par zone Friel), `blocs` (début, durée,
-        distance, allure brute et corrigée de la pente, FC, D+, écart à la cible),
-        `recuperations` entre blocs (FC fin de bloc, FC à +60 s, baisse en bpm),
-        `derive_cardiaque` (découplage FC/allure sur l'effort continu le plus long s'il
-        dépasse 40 min, sinon null). Allures doublées d'un champ `*_mmss` ("M:SS").
+        Sortie (JSON compact, quelques centaines de tokens, jamais de séries brutes) :
+        - `elapsed_s` (temps écoulé, pauses comprises), `moving_s` (temps en mouvement),
+          `pauses` [{`start_s`, `end_s`, `duration_s`}] ;
+        - `vue_ensemble` : distance et allure moyenne calculées sur le temps en mouvement
+          (`pace_min_per_km` + `pace_mmss`), FC, bascule effort/récup ;
+        - `zones_fc` (% du temps par zone Friel) ;
+        - `blocs` (début, durée, distance, allure brute et corrigée de la pente, FC, D+, écart
+          à la cible) ;
+        - `recuperations` entre blocs : FC fin de bloc, FC à +60 s,
+          `variation_fc_60s_bpm` (signée : négative = redescente) et `variation_fc_60s`
+          formatée ("−12 bpm", "+3 bpm"), `baisse_60s_bpm` historique (positive = baisse) ;
+        - `derive_cardiaque` (découplage FC/allure sur l'effort continu le plus long s'il
+          dépasse 40 min, sinon null).
+        Allures en minutes décimales doublées d'un champ "M:SS" (`*_mmss`, `pace_mmss`).
 
         `status` : "ok", "no_data" (série sans allure, ex. natation en piscine -> utiliser
-        garmin_get_swim_splits) ou erreur (`error: true`, `message`).
+        garmin_get_swim_splits) ou erreur (`error: true`, `error_type`, `message`).
         """
         if type not in ANALYSIS_TYPES:
             return _error(f"type invalide : {type} (attendu : {', '.join(ANALYSIS_TYPES)})")
@@ -559,8 +575,13 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
 
         `blocks` : longueurs consécutives séparées par un repos de plus de 10 s — numéros
         de première/dernière longueur, `nb_longueurs`, `distance_m`, `duree_nage_s`,
-        `allure_min_100m` + `allure_mmss`, `fc_moy`, `swolf_moy`, `nages`,
-        `nb_suspectes`, `repos_apres_s`.
+        `allure_min_100m` + `allure_mmss` (alias `pace_min_per_100m` + `pace_mmss`), `fc_moy`,
+        `swolf_moy`, `nages`, `nb_suspectes`, `repos_avant_s`, `repos_apres_s`, `role`
+        ("echauffement" = 1er bloc, "retour_au_calme" = dernier, "serie" entre les deux ;
+        tout est "serie" s'il y a moins de 3 blocs).
+
+        `totaux` : `temps_nage_s` (hors repos), `temps_repos_s`, `temps_total_s`,
+        `distance_m`.
 
         `status` : "ok" | "no_data" (aucune longueur : eau libre, activité non nage) |
         erreur. Cache sans expiration (longueurs brutes ; blocs recalculés à chaque appel).

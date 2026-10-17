@@ -111,9 +111,18 @@ def load_series(details: dict[str, Any]) -> tuple[list[int], list, list, list, l
 
 
 def pauses(t: list[int], gap_s: int = PAUSE_GAP_S) -> list[dict[str, int]]:
-    """Interruptions d'enregistrement (> `gap_s`) : [{"debut_s", "fin_s", "duree_s"}]."""
+    """Interruptions d'enregistrement (> `gap_s`) : début, fin et durée en secondes depuis le
+    départ, en double nommage (`debut_s`/`fin_s`/`duree_s` historiques, `start_s`/`end_s`/
+    `duration_s`)."""
     return [
-        {"debut_s": t[k], "fin_s": t[k + 1], "duree_s": t[k + 1] - t[k]}
+        {
+            "debut_s": t[k],
+            "fin_s": t[k + 1],
+            "duree_s": t[k + 1] - t[k],
+            "start_s": t[k],
+            "end_s": t[k + 1],
+            "duration_s": t[k + 1] - t[k],
+        }
         for k in range(len(t) - 1)
         if t[k + 1] - t[k] > gap_s
     ]
@@ -189,6 +198,8 @@ def block_stats(t: list[int], hr: list, pa: list, el: list, i: int, j: int, di: 
         "dist_km": round(dist, 2),
         "allure": _r(pace, 2),
         "allure_mmss": mmss(pace),
+        "pace_min_per_km": _r(pace, 2),
+        "pace_mmss": mmss(pace),
         "allure_plat": _r(flat, 2),
         "allure_plat_mmss": mmss(flat),
         "fc_moy": _r(st.mean(hrs), 0) if hrs else None,
@@ -245,6 +256,10 @@ def _recoveries(t: list[int], hr: list, blocks: list[tuple[int, int]]) -> list[d
                 "fc_60s": hr60,
                 "baisse_60s_bpm": delta,
                 "fc_remonte": delta < 0 if delta is not None else None,
+                # Variation de FC sur 60 s (FC à +60 s moins FC de fin de bloc) : négative =
+                # redescente. Formatée avec un vrai signe ("−12 bpm", "+3 bpm"), jamais "--N".
+                "variation_fc_60s_bpm": -delta if delta is not None else None,
+                "variation_fc_60s": format_bpm_delta(-delta) if delta is not None else None,
             }
         )
     return out
@@ -260,6 +275,15 @@ def _hr_contrast(hr: list, blocks: list[tuple[int, int]]) -> float | None:
     if not hr_in or not hr_out:
         return None
     return st.mean(hr_in) - st.mean(hr_out)
+
+
+def format_bpm_delta(value: int) -> str:
+    """-12 -> "−12 bpm" (signe moins typographique), 3 -> "+3 bpm", 0 -> "0 bpm"."""
+    if value > 0:
+        return f"+{value} bpm"
+    if value < 0:
+        return f"−{-value} bpm"
+    return "0 bpm"
 
 
 def _is_bimodal(paces: list[float], fast: float, slow: float) -> bool:
@@ -359,6 +383,11 @@ def analyse(
     return {
         "status": "ok",
         "parametres": {"fc_seuil": fc_seuil, "allure_cible": allure_cible, "type": type},
+        # Temps écoulé (pauses comprises) vs temps en mouvement : distance et allure moyenne
+        # de `vue_ensemble` sont calculées sur le temps en mouvement.
+        "elapsed_s": elapsed,
+        "moving_s": moving,
+        "pauses": pauses(t),
         "vue_ensemble": {
             "duree_s": moving,
             "duree_mouvement_s": moving,
@@ -369,6 +398,8 @@ def analyse(
             "distance_km": round(dist, 2),
             "allure_moy": _r(avg_pace, 2),
             "allure_moy_mmss": mmss(avg_pace),
+            "pace_min_per_km": _r(avg_pace, 2),
+            "pace_mmss": mmss(avg_pace),
             "fc_moy": _r(st.mean(hrs), 0) if hrs else None,
             "fc_max": max(hrs) if hrs else None,
             "fc_max_pct_seuil": round(max(hrs) / fc_seuil * 100) if hrs else None,

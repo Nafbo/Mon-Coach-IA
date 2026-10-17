@@ -289,3 +289,78 @@ async def test_body_battery_wake_time_null_without_night(tools: dict, client: Ga
 
     assert result["at_wake"] is None
     assert result["at_wake_at"] is None
+
+
+# -- analyse, natation, formats -------------------------------------------------------------
+
+from src.analysis import series as an  # noqa: E402
+from src.analysis import swim  # noqa: E402
+from tests.synthetic import END_REF, PAUSES_REF, interval_run, swim_session  # noqa: E402
+
+
+@pytest.mark.parametrize(("value", "text"), [(-12, "−12 bpm"), (3, "+3 bpm"), (0, "0 bpm")])
+def test_bpm_delta_format(value: int, text: str) -> None:
+    assert an.format_bpm_delta(value) == text
+    assert "--" not in an.format_bpm_delta(value)
+
+
+def test_analysis_signed_recovery_and_pauses() -> None:
+    details = interval_run()
+    details["heart_rate_bpm"] = [
+        185 if 900 <= t < 2400 and (t - 900) % 300 >= 180 else h
+        for t, h in zip(details["time_s"], details["heart_rate_bpm"])
+    ]
+
+    result = an.analyse(details, 177)
+    recup = result["recuperations"][0]
+
+    assert recup["variation_fc_60s_bpm"] > 0
+    assert recup["variation_fc_60s"].startswith("+")
+    assert result["elapsed_s"] == END_REF
+    assert result["moving_s"] == 3083
+    assert [(p["start_s"], p["duration_s"]) for p in result["pauses"]] == [(2558, 134), (2832, 89)]
+
+
+def test_analysis_drop_is_negative_with_typographic_minus() -> None:
+    recup = an.analyse(interval_run(), 177)["recuperations"][0]
+
+    assert recup["variation_fc_60s_bpm"] < 0
+    assert recup["variation_fc_60s"].startswith("−")
+    assert recup["variation_fc_60s_bpm"] == -recup["baisse_60s_bpm"]
+
+
+def test_analysis_pace_aliases_and_no_raw_series() -> None:
+    result = an.analyse(interval_run(), 177)
+
+    assert result["vue_ensemble"]["pace_mmss"] == result["vue_ensemble"]["allure_moy_mmss"]
+    assert result["blocs"][0]["pace_min_per_km"] == result["blocs"][0]["allure"]
+    for key in ("time_s", "heart_rate_bpm", "pace_min_per_km", "elevation_m"):
+        assert key not in result
+
+
+def test_swim_roles_rest_and_totals() -> None:
+    result = swim.annotate(swim_session())
+    blocks = result["blocks"]
+
+    assert blocks[0]["role"] == "echauffement"
+    assert blocks[-1]["role"] == "retour_au_calme"
+    assert {b["role"] for b in blocks[1:-1]} == {"serie"}
+    assert blocks[0]["repos_avant_s"] is None
+    assert blocks[1]["repos_avant_s"] == blocks[0]["repos_apres_s"]
+    assert blocks[0]["pace_mmss"] == blocks[0]["allure_mmss"]
+    totals = result["totaux"]
+    assert totals["distance_m"] == 1800
+    assert totals["temps_nage_s"] == pytest.approx(sum(s["duration_s"] for s in swim_session()), abs=0.5)
+    assert totals["temps_repos_s"] == pytest.approx(30 + 7 * 20 + 30 + 30, abs=8)
+    assert totals["temps_total_s"] == pytest.approx(totals["temps_nage_s"] + totals["temps_repos_s"], abs=0.2)
+    assert all("pace_mmss" in s for s in result["splits"])
+
+
+def test_weather_unit_and_course_pace_aliases(client: GarminClient) -> None:
+    weather = client.get_activity_weather("1")
+    activity = client.get_recent_activities(date(2026, 10, 10), fetch_limit=20)[0]
+
+    assert weather["wind_speed_unit"] == "km/h"
+    assert weather["wind_speed_kmh"] == 2
+    assert activity["pace_min_per_km"] == activity["allure_moyenne_min_km"]
+    assert activity["pace_mmss"] == activity["allure_moyenne_mmss"] == "6:31"
