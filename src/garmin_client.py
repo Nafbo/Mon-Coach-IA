@@ -49,12 +49,50 @@ ACTIVITY_TYPE_MAP: dict[str, str] = {
 }
 
 
+# Types d'erreur d'accès exposés aux clients MCP (`error_type`) : permettent au coach de
+# distinguer une session expirée d'une coupure réseau ou d'un blocage temporaire de Garmin.
+ERROR_TYPES = ("auth", "network", "rate_limit", "unknown")
+
+
 class GarminAuthenticationError(Exception):
-    """Identifiants Garmin invalides."""
+    """Identifiants Garmin invalides, jeton expiré ou compte verrouillé."""
+
+    error_type = "auth"
 
 
 class GarminUnavailableError(Exception):
-    """Garmin Connect injoignable ou en erreur (hors identifiants invalides)."""
+    """Garmin Connect injoignable ou en erreur (hors identifiants invalides).
+
+    `error_type` : "network" (coupure, erreur HTTP, timeout), "rate_limit" (Garmin limite
+    les appels, HTTP 429) ou "unknown" (exception non catégorisée)."""
+
+    def __init__(self, message: str, error_type: str = "network") -> None:
+        super().__init__(message)
+        self.error_type = error_type
+
+
+def classify_error(exc: BaseException) -> str:
+    """Type d'erreur d'accès ("auth" | "network" | "rate_limit" | "unknown")."""
+    explicit = getattr(exc, "error_type", None)
+    if explicit in ERROR_TYPES:
+        return explicit
+    if isinstance(exc, GarminConnectAuthenticationError):
+        return "auth"
+    if isinstance(exc, GarminConnectTooManyRequestsError):
+        return "rate_limit"
+    if isinstance(exc, GarminConnectConnectionError):
+        return _type_from_message(str(exc))
+    return "unknown"
+
+
+def _type_from_message(message: str) -> str:
+    """Les erreurs HTTP de garminconnect arrivent sous forme de texte ("API Error 401 - ...",
+    "Mobile login returned 429 ...") : le code HTTP tranche le type."""
+    if "429" in message or "rate limit" in message.lower():
+        return "rate_limit"
+    if "401" in message or "403" in message:
+        return "auth"
+    return "network"
 
 
 class GarminClient:
@@ -69,6 +107,9 @@ class GarminClient:
         # Résumé quotidien partagé entre blocs pendant `get_daily_snapshot` (évite de
         # rappeler get_user_summary pour Body Battery puis FC repos).
         self._summary_override: dict[str, dict[str, Any]] = {}
+        # Nuits déjà lues pendant `get_daily_snapshot` (sommeil puis heure de réveil de la
+        # Body Battery) : None hors snapshot, pas de mémoire entre deux appels de tools.
+        self._sleep_memo: dict[str, Any] | None = None
 
     # -- authentification -------------------------------------------------
 
@@ -85,11 +126,18 @@ class GarminClient:
         except GarminConnectAuthenticationError as exc:
             raise GarminAuthenticationError(str(exc)) from exc
         except GarminConnectTooManyRequestsError as exc:
-            raise GarminUnavailableError(f"Trop de tentatives de connexion, réessayer plus tard : {exc}") from exc
+            raise GarminUnavailableError(
+                f"Trop de tentatives de connexion, réessayer plus tard : {exc}", error_type="rate_limit"
+            ) from exc
         except GarminConnectConnectionError as exc:
-            raise GarminUnavailableError(str(exc)) from exc
+            kind = _type_from_message(str(exc))
+            if kind == "auth":
+                raise GarminAuthenticationError(str(exc)) from exc
+            raise GarminUnavailableError(str(exc), error_type=kind) from exc
         except Exception as exc:  # défensif : ne jamais laisser fuiter une exception non catégorisée
-            raise GarminUnavailableError(f"Erreur inattendue lors de la connexion : {exc}") from exc
+            raise GarminUnavailableError(
+                f"Erreur inattendue lors de la connexion : {exc}", error_type="unknown"
+            ) from exc
 
     def _call(self, fn: Callable[..., T], *args: Any, _retry: bool = True, **kwargs: Any) -> T:
         self._ensure_login()
@@ -104,7 +152,10 @@ class GarminClient:
             if _retry:
                 self._logged_in = False
                 return self._call(fn, *args, _retry=False, **kwargs)
-            raise GarminUnavailableError(str(exc)) from exc
+            kind = classify_error(exc)
+            if kind == "auth":
+                raise GarminAuthenticationError(str(exc)) from exc
+            raise GarminUnavailableError(str(exc), error_type=kind) from exc
 
     # -- données individuelles ---------------------------------------------
 
@@ -160,8 +211,13 @@ class GarminClient:
         - `charged` / `drained` : total de points rechargés / consommés sur la journée
           (cumuls Garmin, pas des niveaux) ;
         - `at_wake` : niveau au réveil (résumé quotidien Garmin, null si indisponible) ;
-        - `min` / `max` : niveaux extrêmes mesurés sur la journée ;
-        - `latest_at` : horodatage (ISO Europe/Paris) de la dernière valeur.
+        - `min` / `max` : niveaux extrêmes mesurés sur la journée, `min_at` / `max_at` leur
+          horodatage ;
+        - `latest_at` : horodatage (ISO Europe/Paris) de la dernière valeur ;
+        - `at_wake_at` : heure du réveil (fin de nuit Garmin), null si la nuit n'a pas été
+          enregistrée (montre non portée) ;
+        - `availability` : "ok" | "zero" (points présents mais tous à 0 : donnée non
+          exploitable) | "empty" (aucun point).
         """
         raw = self._call(self._garmin.get_body_battery, iso_date, iso_date)
         entry = raw[0] if isinstance(raw, list) and raw else {}
@@ -170,31 +226,61 @@ class GarminClient:
             for p in (entry.get("bodyBatteryValuesArray") or [])
             if isinstance(p, (list, tuple)) and len(p) >= 2 and p[1] is not None
         ]
-        if not points:
+        availability = _bb_availability(points)
+        if availability != "ok":
             return {
                 "status": "no_data",
+                "availability": availability,
                 "value": None,
                 "charged": None,
                 "drained": None,
                 "at_wake": None,
+                "at_wake_at": None,
                 "min": None,
+                "min_at": None,
                 "max": None,
+                "max_at": None,
                 "latest": None,
                 "latest_at": None,
             }
         levels = [p[1] for p in points]
         summary = self._user_summary(iso_date)
+        at_wake = _to_int(summary.get("bodyBatteryAtWakeTime"), default=None)
+        low = min(points, key=lambda p: p[1])
+        high = max(points, key=lambda p: p[1])
         return {
             "status": "ok",
             "value": _to_int(levels[-1], default=None),
             "charged": _to_int(entry.get("charged"), default=None),
             "drained": _to_int(entry.get("drained"), default=None),
-            "at_wake": _to_int(summary.get("bodyBatteryAtWakeTime"), default=None),
-            "min": _to_int(min(levels), default=None),
-            "max": _to_int(max(levels), default=None),
+            "availability": "ok",
+            "at_wake": at_wake,
+            "at_wake_at": self._wake_time(iso_date) if at_wake is not None else None,
+            "min": _to_int(low[1], default=None),
+            "min_at": _epoch_ms_to_iso(low[0]),
+            "max": _to_int(high[1], default=None),
+            "max_at": _epoch_ms_to_iso(high[0]),
             "latest": _to_int(levels[-1], default=None),
             "latest_at": _epoch_ms_to_iso(points[-1][0]),
         }
+
+    def _sleep_raw(self, iso_date: str) -> Any:
+        if self._sleep_memo is not None and iso_date in self._sleep_memo:
+            return self._sleep_memo[iso_date]
+        raw = self._call(self._garmin.get_sleep_data, iso_date)
+        if self._sleep_memo is not None:
+            self._sleep_memo[iso_date] = raw
+        return raw
+
+    def _wake_time(self, iso_date: str) -> str | None:
+        """Heure de fin de la nuit se terminant le jour donné (ISO Paris), null si absente."""
+        try:
+            raw = self._sleep_raw(iso_date)
+        except Exception as exc:  # donnée complémentaire, jamais bloquante
+            logger.info("get_sleep_data(%s) indisponible : %s", iso_date, exc)
+            return None
+        daily = ((raw or {}).get("dailySleepDTO") or {}) if isinstance(raw, dict) else {}
+        return _epoch_ms_to_iso(daily.get("sleepEndTimestampGMT"))
 
     def get_vo2max(self, today: date, max_lookback_days: int = 7) -> dict[str, Any]:
         # Comme le training status/load, Garmin ne recalcule le VO2max qu'après une activité
@@ -227,20 +313,30 @@ class GarminClient:
             if isinstance(point, dict) and point.get("value") is not None:
                 value = point["value"]
                 measured_on = point.get("calendarDate") or iso_date
-        if value is None:
-            return {"status": "no_data", "resting_hr": None, "measured_on": None, "last_sync_at": None}
+        # Garmin ne date la FC de repos qu'au jour (`calendarDate`), sans heure : c'est une
+        # valeur journalière recalculée à chaque synchro (cf. `last_sync_at`).
+        availability = "empty" if value is None else "zero" if value == 0 else "ok"
+        if availability != "ok":
+            return {
+                "status": "no_data",
+                "availability": availability,
+                "resting_hr": None,
+                "measured_on": None,
+                "last_sync_at": None,
+            }
         # La FC repos du jour est recalculée par Garmin au fil des synchros : `last_sync_at`
         # dit sur quelles données la valeur repose (une valeur du matin peut encore bouger).
         summary = self._user_summary(iso_date)
         return {
             "status": "ok",
+            "availability": "ok",
             "resting_hr": _to_int(value, default=None),
             "measured_on": measured_on,
             "last_sync_at": _garmin_timestamp_to_iso(summary.get("lastSyncTimestampGMT")),
         }
 
     def get_sleep(self, iso_date: str) -> dict[str, Any]:
-        raw = self._call(self._garmin.get_sleep_data, iso_date)
+        raw = self._sleep_raw(iso_date)
         daily = (raw or {}).get("dailySleepDTO") or {}
 
         def minutes(seconds_key: str) -> int | None:
@@ -250,10 +346,11 @@ class GarminClient:
         score = ((daily.get("sleepScores") or {}).get("overall") or {}).get("value")
         # Nuit non (encore) synchronisée : Garmin renvoie un dailySleepDTO sans
         # sleepTimeSeconds (ou à 0) — c'est une absence de donnée, pas une nuit de 0 min.
-        has_sleep = isinstance(daily.get("sleepTimeSeconds"), (int, float)) and daily["sleepTimeSeconds"] > 0
-        if not has_sleep:
+        availability = _sleep_availability(daily)
+        if availability != "ok":
             return {
                 "status": "no_data",
+                "availability": availability,
                 "duration_minutes": None,
                 "deep_minutes": None,
                 "light_minutes": None,
@@ -263,6 +360,7 @@ class GarminClient:
             }
         return {
             "status": "ok",
+            "availability": "ok",
             "duration_minutes": minutes("sleepTimeSeconds"),
             "deep_minutes": minutes("deepSleepSeconds"),
             "light_minutes": minutes("lightSleepSeconds"),
@@ -691,31 +789,64 @@ class GarminClient:
 
     # -- état de santé du connecteur -----------------------------------------
 
-    def get_health(self, today: date) -> dict[str, Any]:
-        """Statut de connexion + fraîcheur des données (tool `garmin_health_check`).
+    def get_last_sync(self) -> dict[str, Any]:
+        """Heure de la dernière synchro de la montre vers Garmin Connect (pas l'heure de
+        l'appel) : `at` (ISO Europe/Paris), `age_minutes`, `source`
+        ("device_last_used" = dernier envoi de la montre, vérifié sur un vrai compte ;
+        "user_summary" = repli sur le résumé quotidien), `device`, `status`.
+        Lève l'exception Garmin en cas d'échec d'accès."""
+        raw = self._call(self._garmin.get_device_last_used)
+        data = raw if isinstance(raw, dict) else {}
+        at = _epoch_ms_to_iso(data.get("lastUsedDeviceUploadTime"))
+        source = "device_last_used"
+        if at is None:
+            summary = self._user_summary(datetime.now(PARIS_TZ).date().isoformat())
+            at = _garmin_timestamp_to_iso(summary.get("lastSyncTimestampGMT"))
+            source = "user_summary" if at else None
+        return {
+            "status": "ok" if at else "no_data",
+            "at": at,
+            "age_minutes": _age_minutes(at),
+            "source": source,
+            "device": data.get("lastUsedDeviceName"),
+        }
 
+    def get_health(self, today: date) -> dict[str, Any]:
+        """Contrôle de la chaîne d'accès (tool `garmin_health_check`). Ne lève jamais :
+        toute erreur est renvoyée dans la réponse.
+
+        Fait de vrais appels authentifiés (dernière synchro, dernière activité, sommeil, Body
+        Battery, FC de repos) : un jeton expiré, un compte verrouillé ou une limite d'appels
+        donnent `status: "error"` avec `error: {type, message}` (message exact de Garmin).
         Chaque sous-contrôle est isolé : un endpoint en erreur n'empêche pas les autres de
-        répondre. Formes des réponses `get_device_last_used` (`lastUsedDeviceUploadTime`,
-        epoch ms) et `sleepEndTimestampGMT` (epoch ms) : non encore confirmées sur un vrai
-        compte — parsing défensif, valeur null si la clé est absente.
+        répondre. Clés historiques (`connection`, `last_activity`, `freshness`) conservées.
         """
         iso_today = today.isoformat()
+        errors: list[dict[str, str]] = []
+
+        def fail(exc: BaseException) -> dict[str, Any]:
+            err = {"type": classify_error(exc), "message": str(exc)}
+            errors.append(err)
+            return {"status": "error", "message": err["message"], "error_type": err["type"]}
+
         try:
             self._ensure_login()
         except Exception as exc:
-            return {"status": "error", "connection": {"status": "error", "message": str(exc)}}
+            failure = fail(exc)
+            return {
+                "status": "error",
+                "error": errors[0],
+                "connection": {"status": "error", "message": failure["message"]},
+                "last_sync": {"status": "error", "at": None, "age_minutes": None, "source": None, "device": None},
+                "latest_activity": None,
+                "data_availability": {k: "error" for k in ("activities", "sleep", "body_battery", "resting_hr")},
+            }
 
         def check(fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
             try:
                 return fn()
             except Exception as exc:  # défensif : un sous-contrôle ne doit jamais tout casser
-                return {"status": "error", "message": str(exc)}
-
-        def last_sync() -> dict[str, Any]:
-            raw = self._call(self._garmin.get_device_last_used)
-            data = raw if isinstance(raw, dict) else {}
-            at = _epoch_ms_to_iso(data.get("lastUsedDeviceUploadTime"))
-            return {"status": "ok" if at else "no_data", "at": at, "device": data.get("lastUsedDeviceName")}
+                return fail(exc)
 
         def last_activity() -> dict[str, Any]:
             raw = self._call(self._garmin.get_activities, 0, 1)
@@ -734,9 +865,12 @@ class GarminClient:
         def sleep() -> dict[str, Any]:
             raw = self._call(self._garmin.get_sleep_data, iso_today)
             daily = (raw or {}).get("dailySleepDTO") or {}
-            at = _epoch_ms_to_iso(daily.get("sleepEndTimestampGMT"))
-            has_sleep = isinstance(daily.get("sleepTimeSeconds"), (int, float)) and daily["sleepTimeSeconds"] > 0
-            return {"status": "ok" if has_sleep else "no_data", "sleep_end": at}
+            availability = _sleep_availability(daily)
+            return {
+                "status": "ok" if availability == "ok" else "no_data",
+                "availability": availability,
+                "sleep_end": _epoch_ms_to_iso(daily.get("sleepEndTimestampGMT")),
+            }
 
         def body_battery() -> dict[str, Any]:
             raw = self._call(self._garmin.get_body_battery, iso_today, iso_today)
@@ -746,26 +880,46 @@ class GarminClient:
                 for p in (entry.get("bodyBatteryValuesArray") or [])
                 if isinstance(p, (list, tuple)) and len(p) >= 2 and p[1] is not None
             ]
-            at = _epoch_ms_to_iso(points[-1][0]) if points else None
-            return {"status": "ok" if points else "no_data", "last_point_at": at}
+            availability = _bb_availability(points)
+            return {
+                "status": "ok" if availability == "ok" else "no_data",
+                "availability": availability,
+                "last_point_at": _epoch_ms_to_iso(points[-1][0]) if points else None,
+            }
 
         def resting_hr() -> dict[str, Any]:
             data = self.get_resting_hr(iso_today)
-            return {"status": data["status"], "date": iso_today if data["status"] == "ok" else None}
+            return {
+                "status": data["status"],
+                "availability": data["availability"],
+                "date": iso_today if data["status"] == "ok" else None,
+            }
 
-        result = {
+        sync = check(self.get_last_sync)
+        activity = check(last_activity)
+        freshness = {"sleep": check(sleep), "body_battery": check(body_battery), "resting_hr": check(resting_hr)}
+
+        latest = None
+        if activity.get("status") == "ok":
+            latest = {
+                "id": activity["activity_id"],
+                "start": _local_to_iso(activity["start_local"]),
+                "type": activity["type"],
+            }
+        activities_availability = {"ok": "ok", "no_data": "empty"}.get(activity["status"], "error")
+        return {
+            "status": "error" if errors else "ok",
+            "error": errors[0] if errors else None,
             "connection": {"status": "ok"},
-            "last_sync": check(last_sync),
-            "last_activity": check(last_activity),
-            "freshness": {
-                "sleep": check(sleep),
-                "body_battery": check(body_battery),
-                "resting_hr": check(resting_hr),
+            "last_sync": {**{"at": None, "age_minutes": None, "source": None, "device": None}, **sync},
+            "last_activity": activity,
+            "latest_activity": latest,
+            "freshness": freshness,
+            "data_availability": {
+                "activities": activities_availability,
+                **{name: block.get("availability", "error") for name, block in freshness.items()},
             },
         }
-        parts = [result["last_sync"], result["last_activity"], *result["freshness"].values()]
-        result["status"] = "error" if any(p["status"] == "error" for p in parts) else "ok"
-        return result
 
     # -- synchronisation complète -------------------------------------------
 
@@ -802,6 +956,7 @@ class GarminClient:
 
         summary = self._user_summary(iso)
         self._summary_override = {iso: summary}
+        self._sleep_memo = {}
         try:
             snapshot = {
                 "sleep": block(lambda: self.get_sleep(iso)),
@@ -815,6 +970,7 @@ class GarminClient:
             }
         finally:
             self._summary_override = {}
+            self._sleep_memo = None
         return snapshot
 
     def sync_all(self, today: date) -> dict[str, Any]:
@@ -945,6 +1101,38 @@ def _garmin_timestamp_to_iso(value: Any) -> str | None:
     if parsed is None:
         return None
     return parsed.replace(tzinfo=timezone.utc).astimezone(PARIS_TZ).isoformat()
+
+
+def _sleep_availability(daily: dict[str, Any]) -> str:
+    """"ok" (nuit mesurée), "zero" (durée présente mais à 0) ou "empty" (aucune donnée)."""
+    seconds = daily.get("sleepTimeSeconds")
+    if not isinstance(seconds, (int, float)):
+        return "empty"
+    return "ok" if seconds > 0 else "zero"
+
+
+def _bb_availability(points: list) -> str:
+    """"ok", "zero" (points présents mais tous à 0) ou "empty" (aucun point)."""
+    if not points:
+        return "empty"
+    return "ok" if any(p[1] for p in points) else "zero"
+
+
+def _age_minutes(iso: str | None) -> int | None:
+    if iso is None:
+        return None
+    return int((datetime.now(PARIS_TZ) - datetime.fromisoformat(iso)).total_seconds() // 60)
+
+
+def _local_to_iso(value: Any) -> str | None:
+    """Heure locale Garmin ("2026-10-17 09:42:59", fuseau de l'appareil = Paris) -> ISO
+    8601 avec décalage Europe/Paris."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.strptime(value[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=PARIS_TZ).isoformat()
+    except ValueError:
+        return None
 
 
 def _epoch_ms_to_iso(value: Any) -> str | None:

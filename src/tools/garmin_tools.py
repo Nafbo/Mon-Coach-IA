@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from src.analysis.series import ANALYSIS_TYPES, analyse, downsample, moving_time, pauses
 from src.analysis.swim import annotate as annotate_swim
-from src.garmin_client import GarminAuthenticationError, GarminClient, GarminUnavailableError
+from src.garmin_client import GarminAuthenticationError, GarminClient, GarminUnavailableError, classify_error
 from src.models import monday_of_week, now_paris, today_paris
 from src.workout_builder import build_workout
 
@@ -50,10 +50,31 @@ def _parse_date(date_str: str | None) -> date:
     return date.fromisoformat(date_str)
 
 
-def _error(message: str) -> dict[str, Any]:
-    """Réponse d'erreur commune à tous les tools : `status` "error" (P3) + `error`/`message`
-    historiques, conservés pour la rétrocompatibilité."""
-    return {"error": True, "status": "error", "message": message}
+def _error(message: str, error_type: str = "invalid_input") -> dict[str, Any]:
+    """Réponse d'erreur commune à tous les tools : `status` "error", `error` (booléen
+    historique, conservé), `message` (message exact) et `error_type` : "auth" | "network" |
+    "rate_limit" | "unknown" pour un échec d'accès à Garmin, "invalid_input" pour un paramètre
+    refusé avant tout appel. `error_detail` regroupe {type, message}."""
+    return {
+        "error": True,
+        "status": "error",
+        "message": message,
+        "error_type": error_type,
+        "error_detail": {"type": error_type, "message": message},
+    }
+
+
+def _availability(block: dict[str, Any]) -> str:
+    """Disponibilité d'un bloc : celle calculée par le client (sommeil, Body Battery, FC de
+    repos distinguent "zero" de "empty"), sinon déduite de `status`."""
+    if block.get("availability") in ("ok", "zero", "empty", "error"):
+        return block["availability"]
+    return {"ok": "ok", "no_data": "empty"}.get(block.get("status"), "error")
+
+
+def _garmin_error(exc: Exception) -> dict[str, Any]:
+    """Réponse d'erreur pour un échec d'accès à Garmin, typée d'après l'exception."""
+    return _error(_garmin_error_message(exc), classify_error(exc))
 
 
 def _garmin_error_message(exc: Exception) -> str:
@@ -150,18 +171,35 @@ def _month_range(start: date, end: date) -> list[tuple[int, int]]:
 def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[str, Callable[..., Any]]:
     """Construit les tools garmin_* liés à un `GarminClient` et une connexion DB donnés."""
 
+    def _last_sync() -> dict[str, Any]:
+        """Dernière synchro montre -> Garmin Connect, jamais bloquante : en cas d'échec
+        d'accès, `status` "error" + `error_type` / `message`, `at` null."""
+        empty = {"at": None, "age_minutes": None, "source": None, "device": None}
+        try:
+            sync = client.get_last_sync()
+        except Exception as exc:
+            return {**empty, "status": "error", "error_type": classify_error(exc), "message": _garmin_error_message(exc)}
+        return {**empty, **sync} if isinstance(sync, dict) else {**empty, "status": "no_data"}
+
     async def garmin_sync() -> dict[str, Any]:
         """Force le rafraîchissement de toutes les données du jour (statut et charge
         d'entraînement, Body Battery, VO2max, FC repos, sommeil, activités des 7 derniers
         jours, seuil lactique, minutes d'intensité) et les écrit en cache — sauf les blocs
-        `no_data`. Sortie : `status` "ok" + `synced_at` (ISO Europe/Paris), ou erreur."""
+        `no_data`.
+
+        Sortie : `status` "ok", `synced_at` (heure de CET appel, ISO Europe/Paris) et
+        `last_sync` = heure de la dernière synchro de la MONTRE vers Garmin Connect
+        (`at` ISO Europe/Paris, `age_minutes`, `source`, `device`) : si `at` est antérieur à
+        une séance, celle-ci n'est pas encore arrivée chez Garmin. En cas d'échec :
+        `status` "error", `error_type` ("auth" | "network" | "rate_limit" | "unknown"),
+        `message` exact."""
         try:
             today = today_paris()
             week_start = monday_of_week(today)
             payloads = client.sync_all(today)
         except Exception as exc:
             logger.warning("garmin_sync failed: %s", exc)
-            return _error(f"Impossible de se connecter à Garmin Connect: {exc}")
+            return _error(f"Impossible de se connecter à Garmin Connect: {exc}", classify_error(exc))
 
         date_keys = {
             "training_status": today.isoformat(),
@@ -182,7 +220,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
             _store_cache(conn, type_, date_keys[type_], payload)
 
         synced_at = now_paris().isoformat()
-        return {"status": "ok", "synced_at": synced_at}
+        return {"status": "ok", "synced_at": synced_at, "last_sync": _last_sync()}
 
     def _fetch_cached(
         type_: str,
@@ -203,7 +241,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
             try:
                 cached = fetch()
             except Exception as exc:
-                return _error(_garmin_error_message(exc))
+                return _garmin_error(exc)
             if cached.get("status") != "no_data":
                 _store_cache(conn, type_, key, cached)
         return {"status": "ok", **cached}
@@ -268,16 +306,25 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         return result if result.get("error") else {"date": iso, **result}
 
     async def garmin_get_recent_activities(days: int = 7, force_refresh: bool = False) -> dict[str, Any]:
-        """Activités des `days` derniers jours (plus récentes en premier). `status` : "ok" |
-        "no_data" (aucune activité sur la période ; jamais mis en cache, pour voir tout de
-        suite une activité synchronisée en retard) | erreur."""
+        """Activités des `days` derniers jours (plus récentes en premier).
+
+        `status` : "ok" | "no_data" (appel réussi, aucune activité sur la période ; jamais mis
+        en cache) | "error" (échec d'accès : `error_type` + `message`, jamais une liste vide).
+        `force_refresh=true` contourne le cache serveur et relit Garmin (à utiliser pour
+        relire après une synchro tardive). `last_sync` : dernière synchro de la montre vers
+        Garmin Connect (`at`, `age_minutes`, `source`) — une liste vide avec un `last_sync.at`
+        antérieur à la séance prévue signifie « pas encore synchronisé », pas « repos ».
+        Allures : `allure_*_min_km` (minutes décimales) + `allure_*_mmss` ("4:26")."""
         today = today_paris()
 
         def fetch() -> dict[str, Any]:
             activities = client.get_recent_activities(today - timedelta(days=days), fetch_limit=days * 4)
             return {"status": "ok" if activities else "no_data", "activities": activities}
 
-        return _fetch_cached("recent_activities", f"{today.isoformat()}:days={days}", fetch, force_refresh=force_refresh)
+        result = _fetch_cached(
+            "recent_activities", f"{today.isoformat()}:days={days}", fetch, force_refresh=force_refresh
+        )
+        return result if result.get("error") else {**result, "last_sync": _last_sync()}
 
     async def garmin_get_training_load(force_refresh: bool = False) -> dict[str, Any]:
         """Charge aiguë/chronique, ratio (null si pas de charge chronique), `load_status`
@@ -361,9 +408,12 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         `training_load` (aiguë/chronique, ratio, statut), `training_load_balance` (charge par
         filière), `lactate_threshold`, `vo2max`.
 
-        Chaque bloc porte son `status` ("ok" | "no_data" | "error" + `message`). `status`
-        global : "error" seulement si tous les blocs sont en erreur, sinon "ok" — la liste
-        `blocks_in_error` / `blocks_no_data` dit lesquels manquent. Le seuil lactique est
+        Chaque bloc porte son `status` ("ok" | "no_data" | "error" + `message`) et son
+        `availability` : "ok" | "zero" (valeur présente mais à 0, non exploitable) | "empty"
+        (pas de donnée) | "error" — récapitulé dans `data_availability`. `status` global :
+        "error" seulement si tous les blocs sont en erreur, sinon "ok" — `blocks_in_error` /
+        `blocks_no_data` disent lesquels manquent. `last_sync` : dernière synchro de la montre
+        vers Garmin Connect (`at`, `age_minutes`, `source`). Le seuil lactique est
         toujours la dernière valeur connue (pas datée) ; statut d'entraînement, charge et
         VO2max remontent jusqu'à 7 jours en arrière (champ `date` de chaque bloc).
         """
@@ -374,7 +424,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         try:
             blocks = client.get_daily_snapshot(target_date)
         except Exception as exc:
-            return _error(_garmin_error_message(exc))
+            return _garmin_error(exc)
 
         # Les blocs "ok" du jour alimentent le cache des tools unitaires (mêmes clés).
         if target_date == today_paris():
@@ -384,27 +434,51 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
 
         in_error = [name for name, b in blocks.items() if b.get("status") == "error"]
         no_data = [name for name, b in blocks.items() if b.get("status") == "no_data"]
+        blocks = {name: {**b, "availability": _availability(b)} for name, b in blocks.items()}
         return {
             "status": "error" if len(in_error) == len(blocks) else "ok",
             "date": target_date.isoformat(),
             "generated_at": now_paris().isoformat(),
+            "last_sync": _last_sync(),
+            "data_availability": {name: b["availability"] for name, b in blocks.items()},
             "blocks_in_error": in_error,
             "blocks_no_data": no_data,
             **blocks,
         }
 
     async def garmin_health_check() -> dict[str, Any]:
-        """État du connecteur Garmin, à appeler en début de routine planifiée : `connection`
-        (login Garmin), `last_sync` (dernier envoi de la montre : `at` ISO Paris, `device`),
-        `last_activity` (dernière activité reçue : id, début, type), `freshness` par métrique
-        du jour (`sleep.sleep_end`, `body_battery.last_point_at`, `resting_hr.date`), chacun
-        avec son `status` ("ok" | "no_data" | "error" + `message`). Jamais mis en cache.
-        `checked_at` : horodatage du contrôle (Europe/Paris)."""
+        """Contrôle de la chaîne d'accès Garmin, à appeler AVANT toute analyse (aucun
+        argument, jamais mis en cache, ne lève jamais d'exception).
+
+        Fait de vrais appels authentifiés à Garmin. Sortie :
+        - `status` : "ok" | "error" ; `error` : null ou {`type`: "auth" | "network" |
+          "rate_limit" | "unknown", `message`: message exact de Garmin} (jeton expiré, compte
+          verrouillé, limite d'appels, réseau coupé) ;
+        - `checked_at` : heure du contrôle (ISO 8601, Europe/Paris) ;
+        - `last_sync` : dernière synchro de la MONTRE vers Garmin Connect (pas l'heure de
+          l'appel) — `at` (ISO Europe/Paris ou null), `age_minutes`, `source`
+          ("device_last_used" | "user_summary"), `device` ;
+        - `latest_activity` : {`id`, `start` (ISO), `type`} ou null ;
+        - `data_availability` : `activities` ("ok" | "empty" | "error"), `sleep`,
+          `body_battery`, `resting_hr` ("ok" | "zero" | "empty" | "error") — "zero" = valeur
+          présente mais à 0 (montre non portée : ne pas la lire comme une vraie mesure),
+          "empty" = aucune donnée.
+        Clés historiques conservées : `connection`, `last_activity`, `freshness`."""
+        checked_at = now_paris().isoformat()
         try:
             health = client.get_health(today_paris())
-        except Exception as exc:
-            return _error(_garmin_error_message(exc))
-        return {"checked_at": now_paris().isoformat(), **health}
+        except Exception as exc:  # get_health ne lève pas ; filet de sécurité
+            err = {"type": classify_error(exc), "message": _garmin_error_message(exc)}
+            return {
+                "status": "error",
+                "error": err,
+                "checked_at": checked_at,
+                "connection": {"status": "error", "message": err["message"]},
+                "last_sync": {"status": "error", "at": None, "age_minutes": None, "source": None, "device": None},
+                "latest_activity": None,
+                "data_availability": {k: "error" for k in ("activities", "sleep", "body_battery", "resting_hr")},
+            }
+        return {"checked_at": checked_at, **health}
 
     def _activity_details(activity_id: str) -> dict[str, Any]:
         """Séries de l'activité (cache sans expiration : une activité passée ne change plus).
@@ -430,7 +504,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         try:
             details = _activity_details(activity_id)
         except Exception as exc:
-            return _error(_garmin_error_message(exc))
+            return _garmin_error(exc)
         # Pauses et temps en mouvement calculés sur la série complète (avant
         # sous-échantillonnage) : un trou de plus de 15 s entre deux points = pause montre.
         t = [x for x in details.get("time_s") or [] if x is not None]
@@ -470,7 +544,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         try:
             details = _activity_details(activity_id)
         except Exception as exc:
-            return _error(_garmin_error_message(exc))
+            return _garmin_error(exc)
         return {"activity_id": str(activity_id), **analyse(details, fc_seuil, allure_cible, type)}
 
     async def garmin_get_swim_splits(activity_id: str) -> dict[str, Any]:
@@ -578,7 +652,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         try:
             existing = client.get_scheduled_workouts(target_date.year, target_date.month)
         except Exception as exc:
-            return _error(_garmin_error_message(exc))
+            return _garmin_error(exc)
 
         duplicate = _find_duplicate_scheduled_workout(existing, name=name, date_str=date)
         if duplicate is not None:
@@ -587,7 +661,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         try:
             upload_result = client.upload_workout(payload)
         except Exception as exc:
-            return _error(_garmin_error_message(exc))
+            return _garmin_error(exc)
 
         workout_id = _extract_workout_id(upload_result)
         if workout_id is None:
@@ -650,7 +724,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
             try:
                 raw = client.get_scheduled_workouts(year, month)
             except Exception as exc:
-                return _error(_garmin_error_message(exc))
+                return _garmin_error(exc)
             for entry in _iter_pushed_workout_entries(raw):
                 entry_date_str = entry.get("date") or entry.get("calendarDate")
                 try:
@@ -672,7 +746,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         try:
             client.delete_workout(workout_id)
         except Exception as exc:
-            return _error(_garmin_error_message(exc))
+            return _garmin_error(exc)
         return {"status": "ok", "workout_id": workout_id}
 
     return {

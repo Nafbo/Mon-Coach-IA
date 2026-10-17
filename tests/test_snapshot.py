@@ -50,6 +50,7 @@ def client(tmp_path) -> GarminClient:
     g.get_training_status.return_value = _TRAINING_RAW
     g.get_lactate_threshold.return_value = {"speed_and_heart_rate": {"heartRate": 177, "speed": 0.369}, "power": {}}
     g.get_max_metrics.return_value = [{"generic": {"vo2MaxValue": 54}}]
+    g.get_device_last_used.return_value = {"lastUsedDeviceName": "Forerunner 265", "lastUsedDeviceUploadTime": 1760682000000}
     return gc
 
 
@@ -93,9 +94,11 @@ async def test_p5_snapshot_minimises_garmin_calls(tools: dict, client: GarminCli
             "get_training_status",
             "get_lactate_threshold",
             "get_max_metrics",
+            "get_device_last_used",
         )
     )
-    assert total == 7
+    # 7 appels de données + 1 pour l'heure de dernière synchro de la montre.
+    assert total == 8
 
 
 async def test_p5_failing_block_is_isolated(tools: dict, client: GarminClient) -> None:

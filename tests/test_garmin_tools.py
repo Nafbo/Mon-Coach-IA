@@ -227,7 +227,12 @@ async def test_resting_hr_authentication_error(tools: dict, fake_client: MagicMo
 
     result = await tools["garmin_get_resting_hr"]()
 
-    assert result == {"error": True, "status": "error", "message": "Identifiants Garmin invalides : bad creds"}
+    assert {k: result[k] for k in ("error", "status", "message", "error_type")} == {
+        "error": True,
+        "status": "error",
+        "message": "Identifiants Garmin invalides : bad creds",
+        "error_type": "auth",
+    }
 
 
 async def test_sleep_unavailable_error(tools: dict, fake_client: MagicMock) -> None:
@@ -246,7 +251,9 @@ async def test_recent_activities_default_days(tools: dict, fake_client: MagicMoc
 
     result = await tools["garmin_get_recent_activities"]()
 
-    assert result == {"status": "ok", "activities": fake_client.get_recent_activities.return_value}
+    assert result["status"] == "ok"
+    assert result["activities"] == fake_client.get_recent_activities.return_value
+    assert "last_sync" in result
     called_since, kwargs = fake_client.get_recent_activities.call_args
     assert called_since[0] == frozen_today - timedelta(days=7)
 
@@ -409,6 +416,7 @@ def test_get_sleep_converts_seconds_to_minutes(client: GarminClient) -> None:
 
     assert result == {
         "status": "ok",
+        "availability": "ok",
         "duration_minutes": 420,
         "deep_minutes": 90,
         "light_minutes": 233,
@@ -858,7 +866,12 @@ async def test_activity_details_error_handling(tools: dict, fake_client: MagicMo
 
     result = await tools["garmin_get_activity_details"]("1")
 
-    assert result == {"error": True, "status": "error", "message": "Identifiants Garmin invalides : bad creds"}
+    assert {k: result[k] for k in ("error", "status", "message", "error_type")} == {
+        "error": True,
+        "status": "error",
+        "message": "Identifiants Garmin invalides : bad creds",
+        "error_type": "auth",
+    }
 
 
 # ---------------------------------------------------------------------------

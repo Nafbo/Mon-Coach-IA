@@ -1,0 +1,453 @@
+{
+ "garmin_analyse_activity": {
+  "items": {
+   "blocs": [
+    "allure",
+    "allure_mmss",
+    "allure_plat",
+    "allure_plat_mmss",
+    "debut_s",
+    "dist_km",
+    "dplus_m",
+    "duree_s",
+    "fc_max",
+    "fc_moy",
+    "n",
+    "pente_pct"
+   ],
+   "recuperations": [
+    "apres_bloc",
+    "baisse_60s_bpm",
+    "duree_s",
+    "fc_60s",
+    "fc_fin_bloc",
+    "fc_remonte",
+    "inclut_pause"
+   ],
+   "zones_fc": [
+    "pct",
+    "zone"
+   ]
+  },
+  "nested": {
+   "parametres": [
+    "allure_cible",
+    "fc_seuil",
+    "type"
+   ],
+   "vue_ensemble": [
+    "allure_moy",
+    "allure_moy_mmss",
+    "bascule_effort_recup",
+    "bascule_effort_recup_mmss",
+    "centre_lent_mmss",
+    "centre_rapide_mmss",
+    "distance_km",
+    "duree_ecoulee_s",
+    "duree_mouvement_s",
+    "duree_s",
+    "fc_max",
+    "fc_max_pct_seuil",
+    "fc_moy",
+    "nb_segments",
+    "pauses",
+    "seance_continue",
+    "source_distance"
+   ]
+  },
+  "top": [
+   "activity_id",
+   "blocs",
+   "derive_cardiaque",
+   "parametres",
+   "recuperations",
+   "status",
+   "vue_ensemble",
+   "zones_fc"
+  ]
+ },
+ "garmin_get_activity_details": {
+  "items": {
+   "pauses": [
+    "debut_s",
+    "duree_s",
+    "fin_s"
+   ]
+  },
+  "nested": {},
+  "top": [
+   "distance_m",
+   "elapsed_s",
+   "elevation_m",
+   "heart_rate_bpm",
+   "moving_s",
+   "pace_min_per_km",
+   "pauses",
+   "status",
+   "time_s"
+  ]
+ },
+ "garmin_get_activity_feedback": {
+  "nested": {},
+  "top": [
+   "effort_percu_libelle",
+   "effort_percu_sur_10",
+   "sensations",
+   "sensations_brut",
+   "status"
+  ]
+ },
+ "garmin_get_activity_weather": {
+  "nested": {},
+  "top": [
+   "apparent_temp_celsius",
+   "condition",
+   "dew_point_celsius",
+   "humidity_percent",
+   "station_distance_km",
+   "station_far",
+   "station_id",
+   "station_name",
+   "status",
+   "temp_celsius",
+   "wind_direction_compass",
+   "wind_gust_kmh",
+   "wind_gust_raw",
+   "wind_speed_kmh",
+   "wind_speed_raw"
+  ]
+ },
+ "garmin_get_body_battery": {
+  "nested": {},
+  "top": [
+   "at_wake",
+   "charged",
+   "date",
+   "drained",
+   "latest",
+   "latest_at",
+   "max",
+   "min",
+   "status",
+   "value"
+  ]
+ },
+ "garmin_get_daily_snapshot": {
+  "nested": {
+   "body_battery": [
+    "at_wake",
+    "charged",
+    "drained",
+    "latest",
+    "latest_at",
+    "max",
+    "min",
+    "status",
+    "value"
+   ],
+   "lactate_threshold": [
+    "cycling",
+    "running",
+    "status"
+   ],
+   "resting_hr": [
+    "last_sync_at",
+    "measured_on",
+    "resting_hr",
+    "status"
+   ],
+   "sleep": [
+    "awake_minutes",
+    "deep_minutes",
+    "duration_minutes",
+    "light_minutes",
+    "rem_minutes",
+    "score",
+    "status"
+   ],
+   "training_load": [
+    "acute_load",
+    "acwr_pourcentage",
+    "acwr_statut",
+    "chronic_load",
+    "cible_charge_chronique_max",
+    "cible_charge_chronique_min",
+    "date",
+    "load_ratio",
+    "load_status",
+    "status"
+   ],
+   "training_load_balance": [
+    "aerobie_elevee",
+    "aerobie_elevee_cible_max",
+    "aerobie_elevee_cible_min",
+    "aerobie_faible",
+    "aerobie_faible_cible_max",
+    "aerobie_faible_cible_min",
+    "charge_anaerobique",
+    "charge_anaerobique_cible_max",
+    "charge_anaerobique_cible_min",
+    "date",
+    "feedback",
+    "status"
+   ],
+   "training_status": [
+    "acute_load",
+    "chronic_load",
+    "date",
+    "status",
+    "training_status"
+   ],
+   "vo2max": [
+    "cycling_vo2max",
+    "date",
+    "running_vo2max",
+    "status"
+   ]
+  },
+  "top": [
+   "blocks_in_error",
+   "blocks_no_data",
+   "body_battery",
+   "date",
+   "generated_at",
+   "lactate_threshold",
+   "resting_hr",
+   "sleep",
+   "status",
+   "training_load",
+   "training_load_balance",
+   "training_status",
+   "vo2max"
+  ]
+ },
+ "garmin_get_intensity_minutes": {
+  "nested": {},
+  "top": [
+   "goal_minutes",
+   "moderate_minutes",
+   "status",
+   "vigorous_minutes",
+   "week_start_date"
+  ]
+ },
+ "garmin_get_lactate_threshold": {
+  "nested": {
+   "cycling": [
+    "ftp_watts"
+   ],
+   "running": [
+    "heart_rate",
+    "pace_min_per_km",
+    "pace_mmss",
+    "power_watts",
+    "power_watts_per_kg"
+   ]
+  },
+  "top": [
+   "cycling",
+   "date",
+   "running",
+   "status"
+  ]
+ },
+ "garmin_get_recent_activities": {
+  "items": {
+   "activities": [
+    "activity_id",
+    "allure_moyenne_100m_mmss",
+    "allure_moyenne_min_100m",
+    "allure_moyenne_min_km",
+    "allure_moyenne_mmss",
+    "allure_rapide_min_km",
+    "allure_rapide_mmss",
+    "avg_hr",
+    "brasses_moyenne_longueur",
+    "brasses_total",
+    "cadence_moyenne_brasses_min",
+    "date",
+    "denivele_m",
+    "distance_km",
+    "duration_minutes",
+    "effet_aerobie",
+    "effet_aerobie_message",
+    "effet_anaerobie",
+    "effet_anaerobie_message",
+    "effet_entrainement",
+    "garmin_type",
+    "max_hr",
+    "meilleur_100m_sec",
+    "nb_longueurs",
+    "piscine_longueur_m",
+    "swolf_moyen",
+    "type"
+   ]
+  },
+  "nested": {},
+  "top": [
+   "activities",
+   "status"
+  ]
+ },
+ "garmin_get_resting_hr": {
+  "nested": {},
+  "top": [
+   "date",
+   "last_sync_at",
+   "measured_on",
+   "provisoire",
+   "resting_hr",
+   "status"
+  ]
+ },
+ "garmin_get_sleep": {
+  "nested": {},
+  "top": [
+   "awake_minutes",
+   "date",
+   "deep_minutes",
+   "duration_minutes",
+   "light_minutes",
+   "rem_minutes",
+   "score",
+   "status"
+  ]
+ },
+ "garmin_get_swim_splits": {
+  "items": {
+   "blocks": [
+    "allure_min_100m",
+    "allure_mmss",
+    "debut_s",
+    "derniere_longueur",
+    "distance_m",
+    "duree_nage_s",
+    "fc_moy",
+    "n",
+    "nages",
+    "nb_longueurs",
+    "nb_suspectes",
+    "premiere_longueur",
+    "repos_apres_s",
+    "swolf_moy"
+   ],
+   "splits": [
+    "avg_hr",
+    "block",
+    "distance_m",
+    "duration_s",
+    "ecart_reference_pct",
+    "length_idx",
+    "pace_min_per_100m",
+    "pace_min_sec_per_100m",
+    "start_s",
+    "stroke",
+    "suspect",
+    "suspect_reason",
+    "swolf"
+   ]
+  },
+  "nested": {},
+  "top": [
+   "blocks",
+   "splits",
+   "status"
+  ]
+ },
+ "garmin_get_training_load": {
+  "nested": {},
+  "top": [
+   "acute_load",
+   "acwr_pourcentage",
+   "acwr_statut",
+   "chronic_load",
+   "cible_charge_chronique_max",
+   "cible_charge_chronique_min",
+   "date",
+   "load_ratio",
+   "load_status",
+   "status"
+  ]
+ },
+ "garmin_get_training_load_balance": {
+  "nested": {},
+  "top": [
+   "aerobie_elevee",
+   "aerobie_elevee_cible_max",
+   "aerobie_elevee_cible_min",
+   "aerobie_faible",
+   "aerobie_faible_cible_max",
+   "aerobie_faible_cible_min",
+   "charge_anaerobique",
+   "charge_anaerobique_cible_max",
+   "charge_anaerobique_cible_min",
+   "date",
+   "feedback",
+   "status"
+  ]
+ },
+ "garmin_get_training_status": {
+  "nested": {},
+  "top": [
+   "acute_load",
+   "chronic_load",
+   "date",
+   "status",
+   "training_status"
+  ]
+ },
+ "garmin_get_vo2max": {
+  "nested": {},
+  "top": [
+   "cycling_vo2max",
+   "date",
+   "running_vo2max",
+   "status"
+  ]
+ },
+ "garmin_health_check": {
+  "nested": {
+   "connection": [
+    "status"
+   ],
+   "freshness": [
+    "body_battery",
+    "resting_hr",
+    "sleep"
+   ],
+   "last_activity": [
+    "activity_id",
+    "start_local",
+    "status",
+    "type"
+   ],
+   "last_sync": [
+    "at",
+    "device",
+    "status"
+   ]
+  },
+  "top": [
+   "checked_at",
+   "connection",
+   "freshness",
+   "last_activity",
+   "last_sync",
+   "status"
+  ]
+ },
+ "garmin_list_workouts": {
+  "nested": {},
+  "top": [
+   "status",
+   "workouts"
+  ]
+ },
+ "garmin_sync": {
+  "nested": {},
+  "top": [
+   "status",
+   "synced_at"
+  ]
+ }
+}

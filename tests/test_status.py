@@ -131,7 +131,12 @@ async def test_p3_error_has_status_and_exact_message(tools: dict, client: Garmin
 
 async def test_p3_invalid_date_is_error(tools: dict) -> None:
     result = await tools["garmin_get_sleep"](date="17/10/2026")
-    assert result == {"error": True, "status": "error", "message": "Date invalide : 17/10/2026"}
+    assert {k: result[k] for k in ("error", "status", "message", "error_type")} == {
+        "error": True,
+        "status": "error",
+        "message": "Date invalide : 17/10/2026",
+        "error_type": "invalid_input",
+    }
 
 
 # -- garmin_health_check -------------------------------------------------------------
@@ -171,7 +176,7 @@ async def test_p3_health_check_all_ok(tools: dict, client: GarminClient) -> None
     }
     assert result["freshness"]["sleep"]["status"] == "ok"
     assert result["freshness"]["body_battery"]["last_point_at"] == result["last_sync"]["at"]
-    assert result["freshness"]["resting_hr"] == {"status": "ok", "date": "2026-10-17"}
+    assert result["freshness"]["resting_hr"] == {"status": "ok", "availability": "ok", "date": "2026-10-17"}
     assert "checked_at" in result
 
 
@@ -185,7 +190,7 @@ async def test_p3_health_check_isolates_failing_endpoint(tools: dict, client: Ga
     assert result["status"] == "error"
     assert result["freshness"]["body_battery"]["status"] == "error"
     assert "timeout" in result["freshness"]["body_battery"]["message"]
-    assert result["freshness"]["sleep"] == {"status": "no_data", "sleep_end": None}
+    assert result["freshness"]["sleep"] == {"status": "no_data", "availability": "empty", "sleep_end": None}
     assert result["last_activity"]["status"] == "ok"
 
 
