@@ -520,6 +520,12 @@ rester réutilisables si l'hébergement change.
 qui compte est `/etc/systemd/system/coach-mcp.service` sur la VM elle-même, pas le template du
 repo (un `git pull` ne le met pas à jour automatiquement).
 
+Depuis le 17/10/2026, le service de la VM est en **`Restart=always`** (au lieu de
+`Restart=on-failure` dans le template) : il redémarre aussi après un arrêt propre inattendu.
+Sauvegarde de l'ancienne version : `/etc/systemd/system/coach-mcp.service.bak-20261017`. Le
+template du repo n'est volontairement pas modifié : la copie de la VM est adaptée sur place et un
+changement côté repo ferait échouer le prochain `git pull`.
+
 ## Mise à jour en production
 
 Procédure pour synchroniser la VM avec `main` après ajout, modification ou suppression d'un
