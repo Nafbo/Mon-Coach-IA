@@ -335,6 +335,45 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
             "activity_weather_v2", key, lambda: client.get_activity_weather(activity_id), ignore_freshness=True
         )
 
+    async def garmin_get_daily_snapshot(date: str | None = None) -> dict[str, Any]:
+        """Vue quotidienne en un seul appel, pour l'analyse du jour (`date` YYYY-MM-DD,
+        défaut aujourd'hui). Blocs, mêmes formats que les tools unitaires :
+        `sleep`, `body_battery`, `resting_hr`, `training_status` (libellé, charges),
+        `training_load` (aiguë/chronique, ratio, statut), `training_load_balance` (charge par
+        filière), `lactate_threshold`, `vo2max`.
+
+        Chaque bloc porte son `status` ("ok" | "no_data" | "error" + `message`). `status`
+        global : "error" seulement si tous les blocs sont en erreur, sinon "ok" — la liste
+        `blocks_in_error` / `blocks_no_data` dit lesquels manquent. Le seuil lactique est
+        toujours la dernière valeur connue (pas datée) ; statut d'entraînement, charge et
+        VO2max remontent jusqu'à 7 jours en arrière (champ `date` de chaque bloc).
+        """
+        try:
+            target_date = _parse_date(date)
+        except ValueError:
+            return _error(f"Date invalide : {date}")
+        try:
+            blocks = client.get_daily_snapshot(target_date)
+        except Exception as exc:
+            return _error(_garmin_error_message(exc))
+
+        # Les blocs "ok" du jour alimentent le cache des tools unitaires (mêmes clés).
+        if target_date == today_paris():
+            for type_, payload in blocks.items():
+                if payload.get("status") == "ok":
+                    _store_cache(conn, type_, target_date.isoformat(), payload)
+
+        in_error = [name for name, b in blocks.items() if b.get("status") == "error"]
+        no_data = [name for name, b in blocks.items() if b.get("status") == "no_data"]
+        return {
+            "status": "error" if len(in_error) == len(blocks) else "ok",
+            "date": target_date.isoformat(),
+            "generated_at": now_paris().isoformat(),
+            "blocks_in_error": in_error,
+            "blocks_no_data": no_data,
+            **blocks,
+        }
+
     async def garmin_health_check() -> dict[str, Any]:
         """État du connecteur Garmin, à appeler en début de routine planifiée : `connection`
         (login Garmin), `last_sync` (dernier envoi de la montre : `at` ISO Paris, `device`),
@@ -614,4 +653,5 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         "garmin_list_workouts": garmin_list_workouts,
         "garmin_delete_workout": garmin_delete_workout,
         "garmin_health_check": garmin_health_check,
+        "garmin_get_daily_snapshot": garmin_get_daily_snapshot,
     }

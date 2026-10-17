@@ -66,6 +66,9 @@ class GarminClient:
         self._tokenstore_path = tokenstore_path
         self._garmin = Garmin(email=email, password=password)
         self._logged_in = False
+        # Résumé quotidien partagé entre blocs pendant `get_daily_snapshot` (évite de
+        # rappeler get_user_summary pour Body Battery puis FC repos).
+        self._summary_override: dict[str, dict[str, Any]] = {}
 
     # -- authentification -------------------------------------------------
 
@@ -118,8 +121,10 @@ class GarminClient:
                 return raw, d.isoformat()
         return {}, today.isoformat()
 
-    def get_training_status(self, today: date) -> dict[str, Any]:
-        raw, found_date = self._fetch_training_status_with_fallback(today)
+    def get_training_status(
+        self, today: date, prefetched: tuple[dict[str, Any], str] | None = None
+    ) -> dict[str, Any]:
+        raw, found_date = prefetched or self._fetch_training_status_with_fallback(today)
         device_entry = _first_device_status(raw)
         status_label = device_entry.get("trainingStatusFeedbackPhrase") or device_entry.get("trainingStatus")
         acute_dto = device_entry.get("acuteTrainingLoadDTO") or {}
@@ -139,6 +144,8 @@ class GarminClient:
         """Résumé quotidien Garmin (`get_user_summary`), utilisé en complément (valeur au
         réveil, dernière synchro). Jamais bloquant : {} en cas d'erreur ou de forme
         inattendue — les champs qui en dépendent valent alors null."""
+        if iso_date in self._summary_override:
+            return self._summary_override[iso_date]
         try:
             raw = self._call(self._garmin.get_user_summary, iso_date)
         except Exception as exc:  # défensif : donnée complémentaire, pas critique
@@ -343,8 +350,10 @@ class GarminClient:
         results.sort(key=lambda a: a["date"], reverse=True)
         return results
 
-    def get_training_load(self, today: date) -> dict[str, Any]:
-        raw, found_date = self._fetch_training_status_with_fallback(today)
+    def get_training_load(
+        self, today: date, prefetched: tuple[dict[str, Any], str] | None = None
+    ) -> dict[str, Any]:
+        raw, found_date = prefetched or self._fetch_training_status_with_fallback(today)
         device_entry = _first_device_status(raw)
         acute_dto = device_entry.get("acuteTrainingLoadDTO") or {}
         acute = _to_int(acute_dto.get("dailyTrainingLoadAcute") or acute_dto.get("acuteTrainingLoad"), default=None)
@@ -373,10 +382,12 @@ class GarminClient:
             "acwr_statut": acute_dto.get("acwrStatus"),
         }
 
-    def get_training_load_balance(self, today: date) -> dict[str, Any]:
+    def get_training_load_balance(
+        self, today: date, prefetched: tuple[dict[str, Any], str] | None = None
+    ) -> dict[str, Any]:
         """Répartition de charge mensuelle aérobie faible / aérobie élevée / anaérobique
         ("Training Load Focus" Garmin) — cf. mostRecentTrainingLoadBalance."""
-        raw, found_date = self._fetch_training_status_with_fallback(today)
+        raw, found_date = prefetched or self._fetch_training_status_with_fallback(today)
         balance = raw.get("mostRecentTrainingLoadBalance") if isinstance(raw, dict) else None
         device_map = (balance or {}).get("metricsTrainingLoadBalanceDTOMap") or {}
         entry = next(iter(device_map.values()), {}) if device_map else {}
@@ -732,6 +743,54 @@ class GarminClient:
         return result
 
     # -- synchronisation complète -------------------------------------------
+
+    def get_daily_snapshot(self, day: date) -> dict[str, Any]:
+        """Vue quotidienne en un appel (tool `garmin_get_daily_snapshot`) : sommeil, Body
+        Battery, FC repos, statut et charge d'entraînement, charge par filière, seuil
+        lactique, VO2max. Chaque bloc porte son propre `status` ("ok" | "no_data" |
+        "error" + `message`) : un endpoint en échec n'empêche pas les autres de répondre.
+
+        Le payload training status n'est récupéré qu'une fois pour statut, charge et
+        filières ; le résumé quotidien (Body Battery au réveil, dernière synchro) une fois
+        pour Body Battery et FC repos.
+        """
+        iso = day.isoformat()
+
+        def block(fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+            try:
+                return fn()
+            except Exception as exc:  # défensif : un bloc en erreur ne casse pas le snapshot
+                return {"status": "error", "message": str(exc)}
+
+        try:
+            training_raw: tuple[dict[str, Any], str] | Exception = self._fetch_training_status_with_fallback(day)
+        except Exception as exc:
+            training_raw = exc
+
+        def from_training(parse: Callable[..., dict[str, Any]]) -> Callable[[], dict[str, Any]]:
+            def run() -> dict[str, Any]:
+                if isinstance(training_raw, Exception):
+                    raise training_raw
+                return parse(day, prefetched=training_raw)
+
+            return run
+
+        summary = self._user_summary(iso)
+        self._summary_override = {iso: summary}
+        try:
+            snapshot = {
+                "sleep": block(lambda: self.get_sleep(iso)),
+                "body_battery": block(lambda: self.get_body_battery(iso)),
+                "resting_hr": block(lambda: self.get_resting_hr(iso)),
+                "training_status": block(from_training(self.get_training_status)),
+                "training_load": block(from_training(self.get_training_load)),
+                "training_load_balance": block(from_training(self.get_training_load_balance)),
+                "lactate_threshold": block(self.get_lactate_threshold),
+                "vo2max": block(lambda: self.get_vo2max(day)),
+            }
+        finally:
+            self._summary_override = {}
+        return snapshot
 
     def sync_all(self, today: date) -> dict[str, Any]:
         """Rafraîchit toutes les données du jour (appelé par le tool `garmin_sync`)."""
