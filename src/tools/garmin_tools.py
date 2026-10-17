@@ -586,8 +586,11 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
           donnent donc le même résultat. Ce qui a été réellement appliqué est décrit dans
           `type_applique` (`detection_blocs`, `allure_bimodale`, `effet`).
         - `pause_merge_s` (optionnel) : pour le découplage cardiaque, fusionne les segments
-          séparés par une pause ≤ ce seuil (en s). Défaut vélo : 120 (feux, carrefours) ;
-          défaut course : aucune fusion (comportement historique inchangé).
+          séparés par une pause ≤ ce seuil (en s). Valeur explicite : appliquée telle quelle.
+          Vélo sans valeur = mode « auto » : pauses ≤ 120 s fusionnées (feux, carrefours),
+          puis, si la fenêtre obtenue couvre moins de 50 % du temps en mouvement d'une sortie
+          de plus de 60 min, élargissement par paliers (300 s puis 600 s, plafond). Course
+          sans valeur : aucune fusion (comportement historique inchangé).
 
         Vélo (sans capteur de puissance ni cadence) : tout est exprimé en km/h, la distance
         des moyennes est la distance officielle Garmin. `vue_ensemble` : `vitesse_moy_kmh`
@@ -596,11 +599,25 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         `distance_integree_km` (traçabilité), `duree_chrono_garmin_s`,
         `centre_rapide_kmh` / `centre_lent_kmh` / `bascule_effort_recup_kmh` ; aucun champ en
         min/km. Blocs : `vitesse_kmh`, sans allure « à plat » (la correction de pente propre à
-        la course n'est pas appliquée au vélo). `derive_cardiaque` : rapport FC / vitesse,
-        1re vs 2e moitié du temps en mouvement du plus long effort continu (≥ 40 min) après
-        fusion des pauses courtes, SANS correction de pente (le relief biaise donc la mesure
-        sur un parcours non symétrique) ; fenêtre utilisée dans `debut_s` / `fin_s` /
-        `duree_s` / `duree_mouvement_s`, pauses absorbées dans `pauses_fusionnees`.
+        la course n'est pas appliquée au vélo).
+
+        Découplage cardiaque vélo (`derive_cardiaque`) : rapport FC / vitesse (km/h), 1re vs
+        2e moitié du temps en mouvement du plus long effort continu (≥ 40 min) après fusion
+        des pauses, SANS correction de pente (aucune n'est inventée : sans capteur de
+        puissance, le relief et le vent biaisent la mesure). Clés :
+        - fenêtre : `debut_s`, `fin_s`, `duree_s`, `duree_mouvement_s`, `couverture_pct`
+          (temps en mouvement de la fenêtre / temps en mouvement total, en %) ;
+        - fusion : `pause_merge_s` réellement appliqué, `pause_merge_mode` ("auto" |
+          "explicite"), `fusion_elargie` (true si le mode auto a dépassé 120 s : fusion jamais
+          silencieuse), `pauses_fusionnees` [{`debut_s`, `duree_s`}] ;
+        - `moities` : pour chaque moitié, `duree_mouvement_s`, `vitesse_moy_kmh`, `dplus_m`,
+          `altitude_moy_m` ;
+        - `decouplage_pct` (toujours renvoyé), `fiable`, `raisons_fiabilite` (vide si fiable)
+          et `lecture` ("stable", "derive moderee", "derive marquee", "negatif marque ..." si
+          fiable ; "non interprétable" sinon). Non fiable si : |découplage| > 10 % ; vitesse
+          moyenne différente de plus de 15 % entre les moitiés ; profil asymétrique (D+ d'une
+          moitié > 2 × l'autre ET écart ≥ 50 m, le minimum évitant les faux positifs sur
+          terrain plat) ; fenêtre couvrant moins de 50 % du temps en mouvement.
 
         Course : sortie historique inchangée, plus `distance_officielle_km` dans
         `vue_ensemble` quand le résumé Garmin est disponible.

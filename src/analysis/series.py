@@ -43,6 +43,23 @@ _STRONG_GAP_KMH = 10.0
 # Vélo : pauses absorbées par défaut pour le découplage (feux, carrefours, ravitaillement
 # court). La course garde son comportement historique (aucune fusion) sauf demande explicite.
 DEFAULT_PAUSE_MERGE_VELO_S = 120
+# Mode auto (pause_merge_s non fourni, vélo) : si la fenêtre couvre moins de 50 % du temps en
+# mouvement d'une sortie de plus de 60 min, élargissement par paliers jusqu'à 600 s.
+_VELO_AUTO_MERGE_STEPS_S = (300, 600)
+_VELO_WIDEN_MIN_MOVING_S = 3600
+# Fiabilité du découplage vélo (sans puissance ni correction de pente) :
+# - au-delà de ±10 %, un découplage FC/vitesse traduit des conditions changeantes (relief,
+#   vent, abri d'un groupe) plutôt qu'une dérive physiologique ;
+# - une vitesse moyenne qui varie de plus de 15 % entre les moitiés rend le rapport FC/vitesse
+#   non comparable (la FC n'est pas proportionnelle à la vitesse) ;
+# - profil asymétrique : D+ d'une moitié > 2 × celui de l'autre ET écart >= 50 m (le minimum
+#   absolu évite les faux positifs sur terrain plat, où 10 m contre 25 m ne change rien) ;
+# - couverture < 50 % : la fenêtre ignore l'essentiel de la sortie.
+_VELO_MAX_ABS_DECOUPLING_PCT = 10.0
+_VELO_MAX_SPEED_GAP_PCT = 15.0
+_VELO_DPLUS_RATIO = 2.0
+_VELO_MIN_DPLUS_GAP_M = 50
+_VELO_MIN_COVERAGE_PCT = 50.0
 # Bornes Friel en fraction de la FC seuil.
 _ZONE_BOUNDS = [0.85, 0.90, 0.95, 1.00, 1.03]
 _ZONE_NAMES = ["Z1 recup", "Z2 endurance", "Z3 tempo", "Z4 seuil", "Z5a", "Z5b+"]
@@ -470,6 +487,120 @@ def _decoupling(
     }
 
 
+def _moving_midpoint(t: list[int], i: int, j: int) -> int:
+    """Indice qui partage [i, j] en deux moitiés égales de TEMPS EN MOUVEMENT."""
+    total = moving_time(t, i, j)
+    acc = 0
+    for x in range(i, j):
+        step = t[x + 1] - t[x]
+        acc += step if step <= PAUSE_GAP_S else 0
+        if acc >= total / 2:
+            return x + 1
+    return j
+
+
+def _half_metrics(t: list[int], pa: list, el: list, a: int, b: int) -> dict[str, Any]:
+    """Vitesse moyenne (km/h), D+ cumulé et altitude moyenne d'une moitié de fenêtre."""
+    speeds = [60 / p for p in pa[a : b + 1] if p and p < _MAX_PACE_SEGMENTATION]
+    els = [e for e in el[a : b + 1] if e is not None]
+    dplus = sum(max(0.0, els[k + 1] - els[k]) for k in range(len(els) - 1)) if len(els) > 1 else None
+    return {
+        "duree_mouvement_s": moving_time(t, a, b),
+        "vitesse_moy_kmh": round(st.mean(speeds), 1) if speeds else None,
+        "dplus_m": round(dplus) if dplus is not None else None,
+        "altitude_moy_m": round(st.mean(els)) if els else None,
+    }
+
+
+def _reliability_reasons(d: float, first: dict[str, Any], second: dict[str, Any], coverage_pct: float) -> list[str]:
+    """Règles de fiabilité du découplage vélo (sans capteur de puissance ni correction de
+    pente) ; liste vide = fiable."""
+    reasons = []
+    if abs(d) > _VELO_MAX_ABS_DECOUPLING_PCT:
+        reasons.append(
+            f"découplage de {d:+.1f} % hors de la plage plausible (±{_VELO_MAX_ABS_DECOUPLING_PCT:.0f} %)"
+        )
+    v1, v2 = first["vitesse_moy_kmh"], second["vitesse_moy_kmh"]
+    if v1 and v2 and abs(v2 - v1) / v1 * 100 > _VELO_MAX_SPEED_GAP_PCT:
+        reasons.append(
+            f"vitesse moyenne très différente entre les moitiés ({v1:.1f} puis {v2:.1f} km/h, "
+            f"écart > {_VELO_MAX_SPEED_GAP_PCT:.0f} %) : conditions (relief, vent, groupe) non comparables"
+        )
+    d1, d2 = first["dplus_m"], second["dplus_m"]
+    if d1 is not None and d2 is not None:
+        low, high = min(d1, d2), max(d1, d2)
+        if high - low >= _VELO_MIN_DPLUS_GAP_M and high > _VELO_DPLUS_RATIO * low:
+            reasons.append(
+                f"profil asymétrique (D+ {d1} m puis {d2} m) : sans correction de pente, la FC par "
+                "km/h n'est pas comparable entre les moitiés"
+            )
+    if coverage_pct < _VELO_MIN_COVERAGE_PCT:
+        reasons.append(
+            f"fenêtre couvrant {coverage_pct:.0f} % du temps en mouvement seulement "
+            f"(< {_VELO_MIN_COVERAGE_PCT:.0f} %) : l'essentiel de la sortie est ignoré"
+        )
+    return reasons
+
+
+def _decoupling_velo(
+    t: list[int], hr: list, pa: list, el: list, blocks: list[tuple[int, int]], segs: list[tuple[int, int]],
+    pause_merge_s: float | None,
+) -> dict[str, Any] | None:
+    """Découplage cardiaque vélo : FC / vitesse, 1re vs 2e moitié du temps en mouvement du plus
+    long effort continu (>= 40 min), sans correction de pente, avec indicateurs de fiabilité.
+
+    `pause_merge_s` None = mode auto : fusion des pauses <= 120 s, puis élargissement par
+    paliers (300 s, 600 s) tant que la fenêtre couvre moins de 50 % du temps en mouvement
+    d'une sortie de plus de 60 min. Valeur explicite = appliquée telle quelle."""
+    total_moving = moving_time(t)
+    auto = pause_merge_s is None
+
+    def window(threshold: float) -> tuple[int, int, list[dict[str, int]], int]:
+        if blocks:
+            candidates, absorbed = blocks, [[] for _ in blocks]
+        else:
+            candidates, absorbed = merged_segments(t, segs, threshold)
+        best = max(range(len(candidates)), key=lambda n: moving_time(t, *candidates[n]))
+        i, j = candidates[best]
+        return i, j, absorbed[best], moving_time(t, i, j)
+
+    applied = DEFAULT_PAUSE_MERGE_VELO_S if auto else pause_merge_s
+    i, j, absorbed, moving = window(applied)
+    if auto and not blocks and total_moving > _VELO_WIDEN_MIN_MOVING_S:
+        for step in _VELO_AUTO_MERGE_STEPS_S:
+            if moving / total_moving * 100 >= _VELO_MIN_COVERAGE_PCT:
+                break
+            applied = step
+            i, j, absorbed, moving = window(step)
+    if moving < _MIN_DECOUPLING_S:
+        return None
+    d = _decoupling_moving_halves(t, hr, pa, i, j, True)
+    if d is None:
+        return None
+
+    k = _moving_midpoint(t, i, j)
+    first, second = _half_metrics(t, pa, el, i, k), _half_metrics(t, pa, el, k, j)
+    coverage = moving / total_moving * 100 if total_moving else 0.0
+    reasons = _reliability_reasons(d, first, second, coverage)
+    return {
+        "debut_s": t[i],
+        "fin_s": t[j],
+        "duree_s": t[j] - t[i],
+        "duree_mouvement_s": moving,
+        "couverture_pct": round(coverage, 1),
+        "pause_merge_s": applied,
+        "pause_merge_mode": "auto" if auto else "explicite",
+        "fusion_elargie": auto and applied > DEFAULT_PAUSE_MERGE_VELO_S,
+        "pauses_fusionnees": absorbed,
+        "moities": {"premiere": first, "seconde": second},
+        "methode": "FC / vitesse (km/h), 1re vs 2e moitié du temps en mouvement, sans correction de pente",
+        "decouplage_pct": round(d, 1),
+        "fiable": not reasons,
+        "raisons_fiabilite": reasons,
+        "lecture": _signed_decoupling_reading(d) if not reasons else "non interprétable",
+    }
+
+
 def _signed_decoupling_reading(d: float) -> str:
     """Lecture d'un découplage calculé à travers les pauses (vélo ou `pause_merge_s`) : comme
     la lecture historique, mais une valeur nettement négative (2e moitié plus « économique »)
@@ -522,8 +653,6 @@ def analyse(
     est trop courte / sans allure (ex. natation en piscine — utiliser garmin_analyse_swim).
     """
     velo = sport == "velo"
-    if velo and pause_merge_s is None:
-        pause_merge_s = DEFAULT_PAUSE_MERGE_VELO_S
     summary = summary or {}
     t, hr, pa, el, di = load_series(details)
     has_distance = any(d is not None for d in di)
@@ -555,7 +684,10 @@ def analyse(
             s["verdict"] = _verdict(ecart)
         block_list.append(s)
 
-    decoupling = _decoupling(t, hr, pa, blocks, segs, pause_merge_s, velo)
+    if velo:
+        decoupling = _decoupling_velo(t, hr, pa, el, blocks, segs, pause_merge_s)
+    else:
+        decoupling = _decoupling(t, hr, pa, blocks, segs, pause_merge_s, velo)
     official_km = summary.get("distance_km")
     common_fc = {
         "fc_moy": _r(st.mean(hrs), 0) if hrs else None,
@@ -591,7 +723,11 @@ def analyse(
             "fc_seuil": fc_seuil,
             "vitesse_cible_kmh": vitesse_cible_kmh,
             "type": type,
-            "pause_merge_s": pause_merge_s,
+            # Valeur réellement appliquée au découplage (mode auto : 120 s, élargi si besoin).
+            "pause_merge_s": decoupling["pause_merge_s"] if decoupling else (
+                pause_merge_s if pause_merge_s is not None else DEFAULT_PAUSE_MERGE_VELO_S
+            ),
+            "pause_merge_mode": "explicite" if pause_merge_s is not None else "auto",
         }
     else:
         vue = {

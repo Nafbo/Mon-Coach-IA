@@ -4,6 +4,23 @@ Toutes les évolutions sont **additives** : aucune clé de réponse existante n'
 retirée (vérifié par `tests/test_non_regression.py`, schémas figés le 17/10/2026), sauf
 l'exception signalée au 17/10/2026 (matin) pour `garmin_get_training_status`.
 
+## 2026-10-17 (soir, suite) — Fiabilité du découplage cardiaque vélo
+
+### Ajouté (vélo uniquement ; `derive_cardiaque` de la course inchangé)
+- `fiable`, `raisons_fiabilite`, `couverture_pct`, `moities` (vitesse moyenne, D+, altitude
+  moyenne et temps en mouvement de chaque moitié), `pause_merge_mode`, `fusion_elargie`.
+- Non fiable (lecture « non interprétable », `decouplage_pct` conservé) si : |découplage| >
+  10 % ; écart de vitesse moyenne > 15 % entre les moitiés ; D+ d'une moitié > 2 × l'autre
+  avec un écart ≥ 50 m ; fenêtre couvrant moins de 50 % du temps en mouvement.
+- `pause_merge_s` non fourni : mode auto (120 s, puis 300 s et 600 s si la couverture est
+  < 50 % sur une sortie de plus de 60 min). Valeur explicite : appliquée telle quelle.
+  `parametres.pause_merge_s` donne la valeur réellement appliquée.
+
+### Sur les sorties réelles
+- 20/09 (24435612737) : non fiable (−19,6 %, vitesse 21,8 puis 29,6 km/h), couverture 68,5 %.
+- 13/09 (24343455443) : la fenêtre par défaut (0–2721 s) couvre 51,3 % du temps en mouvement,
+  au-dessus du seuil de 50 % : pas d'élargissement ; +1,5 %, fiable.
+
 ## 2026-10-17 (soir) — Vélo route sans capteur de puissance
 
 ### Ajouté

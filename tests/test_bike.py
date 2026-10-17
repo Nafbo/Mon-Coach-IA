@@ -33,23 +33,30 @@ def _client(tmp_path) -> GarminClient:
     return client
 
 
-def bike_ride(seed: int = 4, pauses: tuple[tuple[int, int], ...] = ((1500, 30), (2400, 90)), drift: int = 12) -> dict:
-    """Sortie vélo synthétique de 80 min à ~25 km/h, FC qui dérive de `drift` bpm, avec des
-    pauses (début, durée) ; séries au format GarminClient.get_activity_details."""
+def bike_ride(
+    seed: int = 4,
+    pauses: tuple[tuple[int, int], ...] = ((1500, 30), (2400, 90)),
+    drift: int = 12,
+    end: int = 4800,
+    speed_fn=None,
+    elev_fn=None,
+) -> dict:
+    """Sortie vélo synthétique (par défaut 80 min à ~25 km/h, plate), FC qui dérive de `drift`
+    bpm, avec des pauses (début, durée) ; `speed_fn(t)` / `elev_fn(t)` remplacent la vitesse
+    de base et l'altitude. Séries au format GarminClient.get_activity_details."""
     rng = random.Random(seed)
     time_s, hr, pace, elev, dist = [], [], [], [], []
     t, d = 0, 0.0
-    end = 4800
     while t <= end:
         pause = next((p for p in pauses if p[0] < t < p[0] + p[1]), None)
         if pause:
             t = pause[0] + pause[1]
             continue
-        speed = 25 + rng.uniform(-1.5, 1.5)
+        speed = (speed_fn(t) if speed_fn else 25) + rng.uniform(-1.5, 1.5)
         time_s.append(t)
         pace.append(round(60 / speed, 3))
         hr.append(135 + drift * t // end + rng.randint(-2, 2))
-        elev.append(50.0)
+        elev.append(round(elev_fn(t), 1) if elev_fn else 50.0)
         d += speed / 3.6 * (1 if time_s[-1] - (time_s[-2] if len(time_s) > 1 else 0) <= 15 else 0)
         dist.append(round(d, 1))
         t += 1
@@ -161,8 +168,10 @@ def test_bike_decoupling_null_without_merge() -> None:
 
 
 def test_bike_negative_decoupling_is_not_stable() -> None:
-    ride = bike_ride(drift=-30)
-    assert an.analyse(ride, 160, sport="velo")["derive_cardiaque"]["lecture"].startswith("negatif marque")
+    # -7,9 % : fiable mais négatif marqué (pas « stable »).
+    derive = an.analyse(bike_ride(drift=-20), 160, sport="velo")["derive_cardiaque"]
+    assert derive["fiable"] is True
+    assert derive["lecture"].startswith("negatif marque")
 
 
 def test_course_default_has_no_merge() -> None:
@@ -373,3 +382,159 @@ async def test_course_and_swim_outputs_unchanged() -> None:
     assert after["analyse_swim"] == before["analyse_swim"]
     assert after["swim_splits"] == before["swim_splits"]
     assert after["analyse_course"]["sport"] == "course"
+
+
+# -- fiabilité du découplage vélo -------------------------------------------------------------------
+
+
+def test_half_metrics() -> None:
+    # 1re moitié : montée régulière de 150 m à 22 km/h ; 2e moitié : plat à 28 km/h.
+    ride = bike_ride(
+        pauses=(),
+        speed_fn=lambda t: 22 if t < 2400 else 28,
+        elev_fn=lambda t: 50 + 150 * min(t, 2400) / 2400,
+    )
+
+    derive = an.analyse(ride, 160, sport="velo")["derive_cardiaque"]
+    first, second = derive["moities"]["premiere"], derive["moities"]["seconde"]
+
+    assert first["vitesse_moy_kmh"] == pytest.approx(22, abs=0.3)
+    assert second["vitesse_moy_kmh"] == pytest.approx(28, abs=0.3)
+    assert first["dplus_m"] == pytest.approx(150, abs=2)
+    assert second["dplus_m"] == 0
+    assert first["altitude_moy_m"] == pytest.approx(125, abs=2)
+    assert second["altitude_moy_m"] == 200
+    assert first["duree_mouvement_s"] == pytest.approx(second["duree_mouvement_s"], abs=1)
+
+
+def test_reliable_ride() -> None:
+    derive = an.analyse(bike_ride(), 160, sport="velo")["derive_cardiaque"]
+
+    assert derive["fiable"] is True
+    assert derive["raisons_fiabilite"] == []
+    assert derive["lecture"] == "stable"
+    assert derive["couverture_pct"] == 100.0
+    assert "sans correction de pente" in derive["methode"]
+
+
+def test_rule_a_large_decoupling() -> None:
+    derive = an.analyse(bike_ride(drift=-30), 160, sport="velo")["derive_cardiaque"]
+
+    assert derive["decouplage_pct"] < -10
+    assert derive["fiable"] is False
+    assert derive["lecture"] == "non interprétable"
+    assert any("plage plausible" in r for r in derive["raisons_fiabilite"])
+
+
+def test_rule_b_speed_gap() -> None:
+    ride = bike_ride(pauses=(), drift=0, speed_fn=lambda t: 22 if t < 2400 else 27)
+
+    derive = an.analyse(ride, 160, sport="velo")["derive_cardiaque"]
+
+    assert derive["fiable"] is False
+    assert any("vitesse moyenne" in r for r in derive["raisons_fiabilite"])
+    assert derive["decouplage_pct"] is not None  # conservé, même non interprétable
+
+
+def test_rule_c_asymmetric_profile() -> None:
+    climb = bike_ride(pauses=(), elev_fn=lambda t: 50 + 120 * min(t, 2400) / 2400)
+    # Une bosse de 10 m puis une de 25 m : rapport > 2 mais écart < 50 m (terrain plat).
+    bumps = bike_ride(pauses=(), elev_fn=lambda t: 50 + (10 if 600 < t < 900 else 25 if 3000 < t < 3600 else 0))
+
+    asym = an.analyse(climb, 160, sport="velo")["derive_cardiaque"]
+    flat = an.analyse(bumps, 160, sport="velo")["derive_cardiaque"]
+
+    assert any("asymétrique" in r for r in asym["raisons_fiabilite"])
+    assert not any("asymétrique" in r for r in flat["raisons_fiabilite"])
+
+
+def test_rule_d_low_coverage_with_explicit_merge() -> None:
+    # 100 min, pauses de 200 s à 30 min et 75 min : plus long segment 45 min = 45 %.
+    ride = bike_ride(pauses=((1800, 200), (4700, 200)), end=6400)
+
+    derive = an.analyse(ride, 160, sport="velo", pause_merge_s=120)["derive_cardiaque"]
+
+    assert derive["pause_merge_mode"] == "explicite"
+    assert derive["fusion_elargie"] is False
+    assert derive["couverture_pct"] < 50
+    assert derive["fiable"] is False
+    assert any("couvrant" in r for r in derive["raisons_fiabilite"])
+
+
+def test_auto_merge_widens_by_steps() -> None:
+    ride = bike_ride(pauses=((1800, 200), (4700, 200)), end=6400)
+
+    derive = an.analyse(ride, 160, sport="velo")["derive_cardiaque"]
+
+    assert derive["pause_merge_mode"] == "auto"
+    assert derive["pause_merge_s"] == 300  # premier palier suffisant
+    assert derive["fusion_elargie"] is True
+    assert [p["duree_s"] for p in derive["pauses_fusionnees"]] == [200, 200]
+    assert derive["couverture_pct"] == 100.0
+
+
+def test_auto_merge_ceiling() -> None:
+    # Pauses de 15 min : aucun palier (300 s, 600 s) ne les absorbe ; plafond 600 s.
+    ride = bike_ride(pauses=((1800, 900), (5400, 900)), end=8100)
+
+    derive = an.analyse(ride, 160, sport="velo")["derive_cardiaque"]
+
+    assert derive["pause_merge_s"] == 600
+    assert derive["fusion_elargie"] is True
+    assert derive["pauses_fusionnees"] == []
+    assert derive["couverture_pct"] < 50
+    assert derive["fiable"] is False
+
+
+def test_auto_merge_not_widened_for_short_ride() -> None:
+    # 55 min en mouvement (< 60 min) : pas d'élargissement, même avec une couverture faible.
+    ride = bike_ride(pauses=((1500, 300),), end=3600, drift=0)
+
+    result = an.analyse(ride, 160, sport="velo")
+
+    assert result["derive_cardiaque"] is None  # plus long segment < 40 min
+    assert result["parametres"]["pause_merge_s"] == 120
+
+
+def test_explicit_merge_kept_as_is() -> None:
+    ride = bike_ride(pauses=((1800, 200), (4700, 200)), end=6400)
+
+    result = an.analyse(ride, 160, sport="velo", pause_merge_s=250)
+    derive = result["derive_cardiaque"]
+
+    assert derive["pause_merge_s"] == 250
+    assert derive["pause_merge_mode"] == "explicite"
+    assert derive["fusion_elargie"] is False
+    assert result["parametres"]["pause_merge_mode"] == "explicite"
+
+
+def test_course_decoupling_has_no_new_keys() -> None:
+    from tests.synthetic import endurance_run
+
+    derive = an.analyse(endurance_run(), 177, sport="course")["derive_cardiaque"]
+
+    assert set(derive) == {"debut_s", "duree_s", "decouplage_pct", "lecture"}
+
+
+async def test_acceptance_reliability_0920() -> None:
+    tools = _real_tools(BIKE_0920)
+
+    derive = (await tools["garmin_analyse_activity"](BIKE_0920, fc_seuil=160))["derive_cardiaque"]
+
+    assert derive["fiable"] is False
+    assert derive["raisons_fiabilite"]
+    assert derive["lecture"] == "non interprétable"
+    assert derive["decouplage_pct"] == pytest.approx(-19.6, abs=0.1)
+    assert derive["couverture_pct"] == pytest.approx(68.5, abs=0.5)
+
+
+async def test_acceptance_reliability_0913() -> None:
+    tools = _real_tools(BIKE_0913)
+
+    derive = (await tools["garmin_analyse_activity"](BIKE_0913, fc_seuil=160))["derive_cardiaque"]
+
+    # La fenêtre par défaut (0-2721 s) couvre déjà 51,3 % du temps en mouvement (2721 / 5299 s),
+    # au-dessus du seuil de 50 % : le mode auto n'élargit donc pas.
+    assert derive["couverture_pct"] == pytest.approx(51.3, abs=0.1)
+    assert derive["fusion_elargie"] is False
+    assert derive["fiable"] is True
