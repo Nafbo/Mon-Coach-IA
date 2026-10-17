@@ -24,6 +24,11 @@ _MAX_PACE_SEGMENTATION = 12
 _MIN_BLOCK_S = 25
 # Effort continu minimal pour calculer un découplage cardiaque.
 _MIN_DECOUPLING_S = 2400
+# Garde-fous de détection de blocs en mode "auto" : sans eux, le 2-means coupe toujours
+# la série en deux, même sur un footing à allure régulière (côtes, bruit GPS) -> faux blocs.
+# Écart minimal entre allure d'effort et allure de récup, et part minimale de chaque groupe.
+_MIN_CLUSTER_GAP_MIN_KM = 20 / 60
+_MIN_CLUSTER_SHARE = 0.10
 # Bornes Friel en fraction de la FC seuil.
 _ZONE_BOUNDS = [0.85, 0.90, 0.95, 1.00, 1.03]
 _ZONE_NAMES = ["Z1 recup", "Z2 endurance", "Z3 tempo", "Z4 seuil", "Z5a", "Z5b+"]
@@ -83,8 +88,9 @@ def slope_cost(grade_pct: float) -> float:
 # ------------------------------------------------------------------- chargement
 
 
-def load_series(details: dict[str, Any]) -> tuple[list[int], list, list, list]:
-    """Aligne les séries sur `time_s` et retire les points sans temps."""
+def load_series(details: dict[str, Any]) -> tuple[list[int], list, list, list, list]:
+    """Aligne les séries sur `time_s` et retire les points sans temps. Renvoie
+    (temps, FC, allure, altitude, distance cumulée en m — None si non exposée)."""
     t_raw = details.get("time_s") or []
     n = len(t_raw)
 
@@ -92,9 +98,24 @@ def load_series(details: dict[str, Any]) -> tuple[list[int], list, list, list]:
         xs = list(details.get(key) or [])
         return (xs + [None] * n)[:n]
 
-    hr, pa, el = pad("heart_rate_bpm"), pad("pace_min_per_km"), pad("elevation_m")
+    hr, pa, el, di = pad("heart_rate_bpm"), pad("pace_min_per_km"), pad("elevation_m"), pad("distance_m")
     keep = [i for i in range(n) if t_raw[i] is not None]
-    return [t_raw[i] for i in keep], [hr[i] for i in keep], [pa[i] for i in keep], [el[i] for i in keep]
+    return tuple([col[i] for i in keep] for col in (t_raw, hr, pa, el, di))  # type: ignore[return-value]
+
+
+def pauses(t: list[int], gap_s: int = PAUSE_GAP_S) -> list[dict[str, int]]:
+    """Interruptions d'enregistrement (> `gap_s`) : [{"debut_s", "fin_s", "duree_s"}]."""
+    return [
+        {"debut_s": t[k], "fin_s": t[k + 1], "duree_s": t[k + 1] - t[k]}
+        for k in range(len(t) - 1)
+        if t[k + 1] - t[k] > gap_s
+    ]
+
+
+def moving_time(t: list[int], i: int = 0, j: int | None = None, gap_s: int = PAUSE_GAP_S) -> int:
+    """Temps en mouvement entre les indices i et j : somme des pas <= `gap_s`."""
+    j = len(t) - 1 if j is None else j
+    return sum(t[k + 1] - t[k] for k in range(i, j) if t[k + 1] - t[k] <= gap_s)
 
 
 # --------------------------------------------------------------- segmentation
@@ -132,18 +153,23 @@ def effort_blocks(t: list[int], pace_smooth: list, threshold: float, min_s: int 
 # ------------------------------------------------------------------- métriques
 
 
-def _distance_km(t: list[int], pa: list, i: int, j: int) -> float:
+def _distance_km(t: list[int], pa: list, i: int, j: int, di: list | None = None) -> float:
+    """Distance entre i et j. Utilise la distance cumulée Garmin (`sumDistance`) quand elle
+    est disponible ; sinon intègre l'allure, en excluant les pauses (> PAUSE_GAP_S) — les
+    compter revenait à "courir" pendant la pause à l'allure du dernier point."""
+    if di is not None and di[i] is not None and di[j] is not None:
+        return max(0.0, (di[j] - di[i]) / 1000)
     dist = 0.0
     for k in range(i, j):
-        p = pa[k]
-        if p and p > 0:
-            dist += ((t[k + 1] - t[k]) / 60.0) / p
+        p, step = pa[k], t[k + 1] - t[k]
+        if p and p > 0 and step <= PAUSE_GAP_S:
+            dist += (step / 60.0) / p
     return dist
 
 
-def block_stats(t: list[int], hr: list, pa: list, el: list, i: int, j: int) -> dict[str, Any]:
-    dt = t[j] - t[i]
-    dist = _distance_km(t, pa, i, j)
+def block_stats(t: list[int], hr: list, pa: list, el: list, i: int, j: int, di: list | None = None) -> dict[str, Any]:
+    dt = moving_time(t, i, j)
+    dist = _distance_km(t, pa, i, j, di)
     hrs = [h for h in hr[i : j + 1] if h]
     els = [e for e in el[i : j + 1] if e is not None]
     dplus = sum(max(0, els[k + 1] - els[k]) for k in range(len(els) - 1)) if len(els) > 1 else 0
@@ -193,22 +219,38 @@ def hr_zones(hr: list, lthr: float) -> list[dict[str, Any]]:
 
 
 def _recoveries(t: list[int], hr: list, blocks: list[tuple[int, int]]) -> list[dict[str, Any]]:
+    """Récupération entre blocs. `baisse_60s_bpm` est signée : positive = la FC a baissé,
+    négative = elle est remontée (le script d'origine affichait alors "--2 bpm").
+    `duree_s` = temps en mouvement ; `inclut_pause` signale une pause montre dans la récup."""
     out = []
     for n in range(len(blocks) - 1):
         end, nxt = blocks[n][1], blocks[n + 1][0]
         hr_end = next((hr[k] for k in range(end, max(end - 8, 0), -1) if hr[k]), None)
         k60 = next((k for k in range(end, nxt + 1) if t[k] >= t[end] + 60), None)
         hr60 = hr[k60] if k60 is not None and hr[k60] else None
+        delta = (hr_end - hr60) if (hr_end and hr60) else None
         out.append(
             {
                 "apres_bloc": n + 1,
-                "duree_s": t[nxt] - t[end],
+                "duree_s": moving_time(t, end, nxt),
+                "inclut_pause": any(t[k + 1] - t[k] > PAUSE_GAP_S for k in range(end, nxt)),
                 "fc_fin_bloc": hr_end,
                 "fc_60s": hr60,
-                "baisse_60s_bpm": (hr_end - hr60) if (hr_end and hr60) else None,
+                "baisse_60s_bpm": delta,
+                "fc_remonte": delta < 0 if delta is not None else None,
             }
         )
     return out
+
+
+def _is_bimodal(paces: list[float], fast: float, slow: float) -> bool:
+    """Vrai si la série contient réellement deux régimes (effort / récup) : centres écartés
+    d'au moins 20 s/km et chaque groupe >= 10 % des points."""
+    if slow - fast < _MIN_CLUSTER_GAP_MIN_KM:
+        return False
+    threshold = (fast + slow) / 2
+    share_fast = sum(1 for p in paces if p <= threshold) / len(paces)
+    return _MIN_CLUSTER_SHARE <= share_fast <= 1 - _MIN_CLUSTER_SHARE
 
 
 def _verdict(ecart_s: float) -> str:
@@ -234,35 +276,53 @@ def analyse(
     `status` vaut "no_data" si la série est trop courte / sans allure (ex. natation en
     piscine, sans vitesse continue — utiliser garmin_get_swim_splits).
     """
-    t, hr, pa, el = load_series(details)
+    t, hr, pa, el, di = load_series(details)
+    has_distance = any(d is not None for d in di)
     pace_smooth = smooth(pa, 5)
-    fast, slow = kmeans1d([p for p in pace_smooth if p and p < _MAX_PACE_SEGMENTATION])
+    valid_paces = [p for p in pace_smooth if p and p < _MAX_PACE_SEGMENTATION]
+    fast, slow = kmeans1d(valid_paces)
     if fast is None:
         return {"status": "no_data", "message": "Série trop courte ou sans allure pour être segmentée."}
     threshold = (fast + slow) / 2
 
-    duration = t[-1] - t[0]
-    dist = _distance_km(t, pa, 0, len(t) - 1)
+    elapsed = t[-1] - t[0]
+    moving = moving_time(t)
+    dist = _distance_km(t, pa, 0, len(t) - 1, di if has_distance else None)
     hrs = [h for h in hr if h]
-    avg_pace = duration / 60 / dist if dist else None
+    avg_pace = moving / 60 / dist if dist else None
+
+    # Détection des blocs : "endurance" -> aucune ; "fractionne"/"seuil" -> toujours ;
+    # "auto" -> seulement si l'allure est réellement bimodale (pas de faux blocs sur un
+    # footing régulier).
+    if type == "endurance":
+        detect = False
+    elif type == "auto":
+        detect = _is_bimodal(valid_paces, fast, slow)
+    else:
+        detect = True
 
     segs = continuous_segments(t)
     blocks: list[tuple[int, int]] = []
-    for i, j in segs:
-        blocks += [(i + a, i + b) for a, b in effort_blocks(t[i : j + 1], pace_smooth[i : j + 1], threshold)]
-    blocks.sort()
+    if detect:
+        for i, j in segs:
+            blocks += [(i + a, i + b) for a, b in effort_blocks(t[i : j + 1], pace_smooth[i : j + 1], threshold)]
+        blocks.sort()
 
     block_list = []
     for n, (i, j) in enumerate(blocks, 1):
-        s = {"n": n, **block_stats(t, hr, pa, el, i, j)}
+        s = {"n": n, **block_stats(t, hr, pa, el, i, j, di if has_distance else None)}
         if allure_cible and s["allure"]:
             ecart = (s["allure"] - allure_cible) * 60
             s["ecart_cible_s_km"] = round(ecart)
             s["verdict"] = _verdict(ecart)
         block_list.append(s)
 
+    # Découplage cardiaque : uniquement sur un effort continu >= 40 min — le plus long
+    # segment sans pause si aucun bloc n'est détecté, sinon le plus long bloc (un segment
+    # mêlant efforts et récups n'a pas de découplage interprétable).
     decoupling = None
-    longest = max(segs, key=lambda s: t[s[1]] - t[s[0]])
+    candidates = blocks if blocks else segs
+    longest = max(candidates, key=lambda s: t[s[1]] - t[s[0]])
     if t[longest[1]] - t[longest[0]] >= _MIN_DECOUPLING_S:
         d = cardiac_decoupling(t, hr, pa, *longest)
         if d is not None:
@@ -277,7 +337,12 @@ def analyse(
         "status": "ok",
         "parametres": {"fc_seuil": fc_seuil, "allure_cible": allure_cible, "type": type},
         "vue_ensemble": {
-            "duree_s": duration,
+            "duree_s": moving,
+            "duree_mouvement_s": moving,
+            "duree_ecoulee_s": elapsed,
+            "pauses": pauses(t),
+            "source_distance": "garmin" if has_distance else "integration_allure",
+            "seance_continue": not blocks,
             "distance_km": round(dist, 2),
             "allure_moy": _r(avg_pace, 2),
             "allure_moy_mmss": mmss(avg_pace),

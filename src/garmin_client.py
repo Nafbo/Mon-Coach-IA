@@ -423,6 +423,9 @@ class GarminClient:
         # au dénivelé), seul champ de vitesse disponible dans ce cas.
         speed_idx = _index_for("directSpeed", "directGradeAdjustedSpeed")
         elevation_idx = _index_for("directElevation")
+        # Distance cumulée mesurée par Garmin (m) : plus fiable que l'intégration de l'allure
+        # pour l'analyse (P2). Absente des payloads mis en cache avant son ajout.
+        distance_idx = _index_for("sumDistance")
 
         def _value_at(metrics: list[Any] | None, idx: int | None) -> Any:
             return metrics[idx] if metrics is not None and idx is not None and idx < len(metrics) else None
@@ -431,6 +434,7 @@ class GarminClient:
         heart_rate_bpm: list[int | None] = []
         pace_min_per_km: list[float | None] = []
         elevation_m: list[float | None] = []
+        distance_m: list[float | None] = []
         for point in points:
             metrics = point.get("metrics") if isinstance(point, dict) else None
             metrics = metrics if isinstance(metrics, list) else None
@@ -438,12 +442,14 @@ class GarminClient:
             heart_rate_bpm.append(_to_int(_value_at(metrics, hr_idx), default=None))
             pace_min_per_km.append(_pace_min_per_km(_value_at(metrics, speed_idx)))
             elevation_m.append(_round_or_none(_value_at(metrics, elevation_idx)))
+            distance_m.append(_round_or_none(_value_at(metrics, distance_idx)))
 
         return {
             "time_s": time_s,
             "heart_rate_bpm": heart_rate_bpm,
             "pace_min_per_km": pace_min_per_km,
             "elevation_m": elevation_m,
+            "distance_m": distance_m,
         }
 
     def get_swim_splits(self, activity_id: str | int) -> list[dict[str, Any]]:
