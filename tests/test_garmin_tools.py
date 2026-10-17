@@ -1367,7 +1367,11 @@ async def test_swim_splits_tool_fetches_then_caches_without_expiry(tools: dict, 
     first = await tools["garmin_get_swim_splits"]("24052008564")
     second = await tools["garmin_get_swim_splits"]("24052008564")
 
-    assert first == {"status": "ok", "splits": fake_client.get_swim_splits.return_value}
+    assert first["status"] == "ok"
+    assert [x["length_idx"] for x in first["splits"]] == [
+        x["length_idx"] for x in fake_client.get_swim_splits.return_value
+    ]
+    assert len(first["blocks"]) >= 1
     assert second == first
     fake_client.get_swim_splits.assert_called_once_with("24052008564")
 
@@ -1384,7 +1388,7 @@ async def test_swim_splits_tool_cache_ignores_freshness_window(
 
     result = await tools["garmin_get_swim_splits"]("999")
 
-    assert result == {"status": "ok", "splits": []}
+    assert result == {"status": "ok", "splits": [], "blocks": []}
     fake_client.get_swim_splits.assert_not_called()
 
 

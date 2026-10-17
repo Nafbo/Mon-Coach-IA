@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
 from src.analysis.series import ANALYSIS_TYPES, analyse, downsample, moving_time, pauses
+from src.analysis.swim import annotate as annotate_swim
 from src.garmin_client import GarminAuthenticationError, GarminClient, GarminUnavailableError
 from src.models import monday_of_week, now_paris, today_paris
 from src.workout_builder import build_workout
@@ -455,13 +456,33 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         return {"activity_id": str(activity_id), **analyse(details, fc_seuil, allure_cible, type)}
 
     async def garmin_get_swim_splits(activity_id: str) -> dict[str, Any]:
+        """Longueurs d'une séance de nage en piscine, regroupées en blocs.
+
+        `splits` : une entrée par longueur — `length_idx`, `start_s` (depuis la 1re
+        longueur), `duration_s`, `distance_m`, `avg_hr`, `swolf`, `stroke`,
+        `pace_min_per_100m` + `pace_min_sec_per_100m` ("M:SS"), `block` (n° de bloc),
+        `suspect` (true si la durée s'écarte de plus de -20 % / +40 % de la médiane de
+        référence : virage mal détecté probable — la longueur est conservée),
+        `suspect_reason` ("too_fast" | "too_slow" | null), `ecart_reference_pct`.
+
+        `blocks` : longueurs consécutives séparées par un repos de plus de 10 s — numéros
+        de première/dernière longueur, `nb_longueurs`, `distance_m`, `duree_nage_s`,
+        `allure_min_100m` + `allure_mmss`, `fc_moy`, `swolf_moy`, `nages`,
+        `nb_suspectes`, `repos_apres_s`.
+
+        `status` : "ok" | "no_data" (aucune longueur : eau libre, activité non nage) |
+        erreur. Cache sans expiration (longueurs brutes ; blocs recalculés à chaque appel).
+        """
         key = str(activity_id)
 
         def fetch() -> dict[str, Any]:
             splits = client.get_swim_splits(activity_id)
             return {"status": "ok" if splits else "no_data", "splits": splits}
 
-        return _fetch_cached("swim_splits", key, fetch, ignore_freshness=True)
+        result = _fetch_cached("swim_splits", key, fetch, ignore_freshness=True)
+        if result.get("error"):
+            return result
+        return {**result, **annotate_swim(result.get("splits") or [])}
 
     async def garmin_push_workout(
         date: str, name: str, structure: dict[str, Any], dry_run: bool = True

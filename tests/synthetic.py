@@ -80,3 +80,42 @@ def to_garmin_details(series: dict[str, list]) -> dict[str, Any]:
         prev_t = t
         points.append({"metrics": [h, float(t), speed, e, round(dist, 1)]})
     return {"metricDescriptors": descriptors, "activityDetailMetrics": points}
+
+
+# Longueurs aberrantes relevées sur 24748453127 (n° de longueur -> durée en s).
+SWIM_SUSPECTS_REF = {21: 18.0, 59: 20.3}
+
+
+def swim_session() -> list[dict[str, Any]]:
+    """Séance de nage calquée sur 24748453127 (16/10) : 72 longueurs de 25 m, sortie de
+    `GarminClient.get_swim_splits`. Structure : 200 m échauffement (8 L à 30 s), 8 × 100 m
+    (4 L à 27 s, 20 s de repos), 400 m (16 L à 28 s), 400 m retour au calme (16 L à 29 s) ;
+    30 s de repos entre les parties. Longueurs 21 (18,0 s) et 59 (20,3 s) aberrantes."""
+    plan: list[tuple[int, float, float]] = [(8, 30.0, 30.0)]  # (longueurs, durée, repos après)
+    plan += [(4, 27.0, 20.0)] * 7 + [(4, 27.0, 30.0)]
+    plan += [(16, 28.0, 30.0), (16, 29.0, 0.0)]
+    rng = random.Random(3)
+    splits: list[dict[str, Any]] = []
+    t = 0.0
+    idx = 1
+    for n_lengths, duration, rest in plan:
+        for _ in range(n_lengths):
+            d = SWIM_SUSPECTS_REF.get(idx, round(duration + rng.uniform(-0.8, 0.8), 1))
+            pace = round(d / 25 * 100 / 60, 2)
+            splits.append(
+                {
+                    "length_idx": idx,
+                    "start_s": int(t),
+                    "duration_s": d,
+                    "distance_m": 25.0,
+                    "avg_hr": 130 + rng.randint(0, 15),
+                    "swolf": int(d) + 16,
+                    "stroke": "FREESTYLE",
+                    "pace_min_per_100m": pace,
+                    "pace_min_sec_per_100m": f"{int(pace)}:{round((pace - int(pace)) * 60):02d}",
+                }
+            )
+            t += d
+            idx += 1
+        t += rest
+    return splits
