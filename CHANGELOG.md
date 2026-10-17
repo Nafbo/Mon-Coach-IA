@@ -4,6 +4,29 @@ Toutes les évolutions sont **additives** : aucune clé de réponse existante n'
 retirée (vérifié par `tests/test_non_regression.py`, schémas figés le 17/10/2026), sauf
 l'exception signalée au 17/10/2026 (matin) pour `garmin_get_training_status`.
 
+## 2026-10-17 (fin d'après-midi) — Analyse de natation côté serveur
+
+### Ajouté
+- **`garmin_analyse_swim(activity_id, css_blocks=None, target_css_min_per_100m=None)`** :
+  agrégats uniquement (aucune liste de longueurs). `overview` (distance, longueurs, temps
+  nagé, temps écoulé de la 1re longueur au dernier mur, repos, allure sur le temps nagé),
+  `blocks` (temps nagé, allure, allures 1re/2e moitié, `drift_pct`, FC moyenne/max à titre
+  informatif, SWOLF, repos après), `suspect_lengths` (écart à la médiane du bloc supérieur à
+  max(3 × 1,4826 × MAD, 30 % de la médiane), blocs de 4 longueurs et plus), `css` (premier
+  400 m puis premier 200 m qui le suit, ou `css_blocks` imposés ; sensibilité au court 5 s
+  plus rapide ; `control.short_not_faster` ; écart à la cible sur 100 m et sur 1900 m) ou
+  `null` avec `css_null_reason`. Erreurs au format `error: {type, message}`.
+- **`garmin_get_swim_splits`** : par bloc, `swim_time_s`, `rest_after_s`,
+  `first_half_pace_mmss`, `second_half_pace_mmss` (champs existants conservés).
+
+### Validé sur données réelles
+- Test CSS du 17/10 (24752973255) : 400 m en 6:45, 200 m en 3:20, CSS 1:42/100 m,
+  sensibilité 1:45, `short_not_faster = true`, aucune longueur suspecte.
+- 24748453127 : la règle MAD signale les longueurs 21 (18,0 s) et 22 (36,1 s, sa jumelle :
+  virage mal détecté). La longueur 59 (20,3 s) reste sous le seuil de la règle dans son bloc
+  (écart 8,45 s pour un seuil de 9,12 s) ; l'ancienne règle de `garmin_get_swim_splits`
+  (`suspect`, −20 %/+40 %) continue de la signaler.
+
 ## 2026-10-17 (après-midi) — Fiabilisation de l'accès Garmin
 
 ### Ajouté

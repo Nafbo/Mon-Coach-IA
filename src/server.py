@@ -45,7 +45,7 @@ def _register_tool(mcp: MCPServer, name: str, func: Callable[..., Any]) -> None:
             return {"error": True, "message": f"Erreur interne inattendue : {exc}"}
 
         duration_ms = (time.monotonic() - start) * 1000
-        is_error = isinstance(result, dict) and result.get("error") is True
+        is_error = isinstance(result, dict) and (result.get("error") is True or result.get("status") == "error")
         logger.info("tool=%s status=%s duration_ms=%.1f", name, "error" if is_error else "ok", duration_ms)
         return result
 

@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
 from src.analysis.series import ANALYSIS_TYPES, analyse, downsample, moving_time, pauses
+from src.analysis.swim import analyse_swim
 from src.analysis.swim import annotate as annotate_swim
 from src.garmin_client import GarminAuthenticationError, GarminClient, GarminUnavailableError, classify_error
 from src.models import monday_of_week, now_paris, today_paris
@@ -580,8 +581,15 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         ("echauffement" = 1er bloc, "retour_au_calme" = dernier, "serie" entre les deux ;
         tout est "serie" s'il y a moins de 3 blocs).
 
+        Noms normalisés partagés avec `garmin_analyse_swim` : `swim_time_s` (temps nagé hors
+        repos), `rest_after_s`, `first_half_pace_mmss` / `second_half_pace_mmss` (null sous 4
+        longueurs).
+
         `totaux` : `temps_nage_s` (hors repos), `temps_repos_s`, `temps_total_s`,
         `distance_m`.
+
+        Pour analyser une séance (allures par bloc, dérive, CSS, longueurs aberrantes),
+        utiliser `garmin_analyse_swim` plutôt que de lire ces longueurs à la main.
 
         `status` : "ok" | "no_data" (aucune longueur : eau libre, activité non nage) |
         erreur. Cache sans expiration (longueurs brutes ; blocs recalculés à chaque appel).
@@ -596,6 +604,81 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         if result.get("error"):
             return result
         return {**result, **annotate_swim(result.get("splits") or [])}
+
+    def _swim_error(base: dict[str, Any]) -> dict[str, Any]:
+        """Erreur au format de garmin_analyse_swim : `error` = {type, message} (outil créé
+        avec ce format ; les outils historiques gardent `error: true`)."""
+        return {
+            **base,
+            "status": "error",
+            "error": {"type": base["error_type"], "message": base["message"]},
+        }
+
+    async def garmin_analyse_swim(
+        activity_id: str,
+        css_blocks: list[int] | None = None,
+        target_css_min_per_100m: float | None = None,
+    ) -> dict[str, Any]:
+        """Analyse chiffrée d'une séance de natation en piscine, calculée par le serveur. À
+        utiliser pour toute analyse de natation, en remplacement de la lecture manuelle des
+        splits (`garmin_get_swim_splits`). Renvoie uniquement des agrégats, jamais la liste
+        des longueurs.
+
+        Entrée : `activity_id` ; `css_blocks` (optionnel) = [n° du bloc long, n° du bloc
+        court] pour imposer les deux chronos du test de vitesse critique ;
+        `target_css_min_per_100m` (optionnel) = CSS visée en minutes décimales /100 m
+        (1.6667 = 1:40).
+
+        Règles : toutes les allures sont calculées sur le temps nagé (somme des longueurs),
+        jamais sur le temps écoulé. La FC (capteur optique peu fiable dans l'eau) est
+        renvoyée à titre informatif et n'entre dans aucun calcul.
+
+        Sortie :
+        - `overview` : `distance_m`, `nb_longueurs`, `swim_time_s` (temps nagé), `elapsed_s`
+          (de la première longueur au dernier mur), `rest_s` (= elapsed − swim),
+          `pace_min_per_100m` + `pace_mmss` (sur le temps nagé), `nb_blocks` ;
+        - `blocks[]` (séries délimitées par un repos > 10 s) : `n`, `first_length`,
+          `last_length`, `nb_lengths`, `distance_m`, `swim_time_s` (+ `swim_time_mmss`),
+          `pace_min_per_100m` + `pace_mmss`, `first_half_pace_mmss`, `second_half_pace_mmss`,
+          `drift_pct` ((2e moitié − 1re) / 1re × 100, null sous 4 longueurs), `hr_avg`,
+          `hr_max`, `swolf_avg`, `rest_after_s` (null pour le dernier bloc), `suspect_count` ;
+        - `suspect_lengths[]` : longueurs dont la durée s'écarte de la médiane de leur bloc de
+          plus de max(3 × 1,4826 × MAD, 30 % de la médiane) — `length_idx`, `duration_s`,
+          `block_median_s`, `reason` ("too_fast" | "too_slow") ; blocs de moins de 4 longueurs
+          non testés ;
+        - `css` : null (avec la raison dans `css_null_reason`) sauf si deux chronos sont
+          identifiés — par défaut le premier bloc de 400 m puis le premier bloc de 200 m qui le
+          suit. Contient `t_long_s`, `t_short_s` (+ "M:SS"), `css_s_per_100m`, `css_mmss`
+          (= (t_long − t_court) / (d_long − d_court) × 100), `sensitivity_short_minus_5s_mmss`
+          (CSS si le court avait été nagé 5 s plus vite), si une cible est donnée
+          `gap_s_per_100m` et `gap_s_over_1900m`, et `control` : `short_vs_first_half_s`
+          (chrono court − même distance au début du chrono long) et `short_not_faster` (vrai si
+          l'écart est supérieur à −3 s : le court n'a pas été nagé plus vite, CSS probablement
+          optimiste).
+
+        `status` : "ok" | "no_data" (aucune longueur : eau libre, activité non nage) | "error"
+        avec `error` = {`type` ("auth" | "network" | "rate_limit" | "unknown" |
+        "invalid_input"), `message`}.
+        """
+        if css_blocks is not None and (
+            not isinstance(css_blocks, list) or len(css_blocks) != 2 or not all(isinstance(n, int) for n in css_blocks)
+        ):
+            return _swim_error(_error(f"css_blocks invalide : {css_blocks} (attendu [n° bloc long, n° bloc court])"))
+        if target_css_min_per_100m is not None and target_css_min_per_100m <= 0:
+            return _swim_error(_error(f"target_css_min_per_100m invalide : {target_css_min_per_100m}"))
+
+        def fetch() -> dict[str, Any]:
+            splits = client.get_swim_splits(activity_id)
+            return {"status": "ok" if splits else "no_data", "splits": splits}
+
+        result = _fetch_cached("swim_splits", str(activity_id), fetch, ignore_freshness=True)
+        if result.get("error"):
+            return _swim_error(result)
+        analysis = analyse_swim(result.get("splits") or [], css_blocks, target_css_min_per_100m)
+        # Numéros de blocs imposés hors de la séance : erreur d'appel, pas une simple CSS absente.
+        if (analysis.get("css_null_reason") or "").startswith("css_blocks invalide"):
+            return _swim_error(_error(analysis["css_null_reason"]))
+        return {"activity_id": str(activity_id), **analysis}
 
     async def garmin_push_workout(
         date: str, name: str, structure: dict[str, Any], dry_run: bool = True
@@ -787,6 +870,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         "garmin_get_activity_details": garmin_get_activity_details,
         "garmin_analyse_activity": garmin_analyse_activity,
         "garmin_get_swim_splits": garmin_get_swim_splits,
+        "garmin_analyse_swim": garmin_analyse_swim,
         "garmin_push_workout": garmin_push_workout,
         "garmin_list_workouts": garmin_list_workouts,
         "garmin_delete_workout": garmin_delete_workout,

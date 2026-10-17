@@ -246,7 +246,7 @@ permanent change, sa clé est versionnée (ex. `activity_weather_v2`).
 
 ## Tools MCP exposés
 
-28 tools au total. La description détaillée de chaque tool (entrées, sorties, unités, états
+29 tools au total. La description détaillée de chaque tool (entrées, sorties, unités, états
 d'erreur) est sa docstring dans `src/tools/garmin_tools.py` / `src/tools/operational_tools.py` :
 c'est elle que le client MCP reçoit comme description du tool.
 
@@ -302,6 +302,7 @@ c'est elle que le client MCP reçoit comme description du tool.
 | `garmin_get_activity_feedback` | Auto-évaluation saisie sur la montre en fin d'activité : `sensations` (Très faible → Très fort) et `effort_percu_sur_10` (RPE) avec son libellé ; `no_data` si rien n'a été saisi (cache 1h, `no_data` jamais mis en cache) |
 | `garmin_get_activity_weather` | Météo d'une activité : °C, vent en km/h, distance station ↔ départ (`station_far` au-delà de 15 km) |
 | `garmin_get_activity_details` | Séries FC / allure / dénivelé / distance alignées sur le temps, `elapsed_s`, `moving_s`, `pauses`. `resolution_s` optionnel (ex. 5 = 1 point / 5 s, médiane) |
+| `garmin_analyse_swim` | **Analyse de natation côté serveur, à utiliser à la place de la lecture manuelle des longueurs** : `overview` (temps nagé vs écoulé, repos, allure sur le temps nagé), `blocks` (allure, 1re/2e moitié, dérive, FC informative, SWOLF, repos), `suspect_lengths` (écart à la médiane du bloc > max(3 × 1,4826 × MAD, 30 %)), `css` (test de vitesse critique 400 m + 200 m détecté automatiquement ou `css_blocks` imposés, sensibilité, contrôle, écart à `target_css_min_per_100m`). Agrégats uniquement |
 | `garmin_get_swim_splits` | Longueurs de piscine (allure/FC/SWOLF) + `blocks` délimités par les repos (rôle échauffement / série / retour au calme, repos avant/après) + `totaux` (nage hors repos, repos) ; longueurs aberrantes marquées `suspect: true` (conservées) |
 
 ### Garmin — séances structurées (écriture)
