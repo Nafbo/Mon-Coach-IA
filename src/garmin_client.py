@@ -20,6 +20,8 @@ from garminconnect import (
     GarminConnectTooManyRequestsError,
 )
 
+from src.models import PARIS_TZ
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
@@ -123,10 +125,13 @@ class GarminClient:
         acute = acute_dto.get("dailyTrainingLoadAcute") or acute_dto.get("acuteTrainingLoad")
         chronic = acute_dto.get("dailyTrainingLoadChronic") or acute_dto.get("chronicTrainingLoad")
         return {
+            "status": "ok" if device_entry else "no_data",
             "date": found_date,
-            "status": str(status_label) if status_label is not None else "unknown",
-            "acute_load": _to_int(acute, default=0),
-            "chronic_load": _to_int(chronic, default=0),
+            # Libellé Garmin (ex. "PRODUCTIVE_1") : anciennement sous la clé "status", qui porte
+            # désormais l'état de la donnée (ok/no_data/error), commun à tous les tools.
+            "training_status": str(status_label) if status_label is not None else None,
+            "acute_load": _to_int(acute, default=None),
+            "chronic_load": _to_int(chronic, default=None),
         }
 
     def get_body_battery(self, iso_date: str) -> dict[str, Any]:
@@ -139,9 +144,10 @@ class GarminClient:
                 latest_value = point[1]
                 break
         return {
-            "value": _to_int(latest_value, default=0),
-            "charged": _to_int(entry.get("charged"), default=0),
-            "drained": _to_int(entry.get("drained"), default=0),
+            "status": "ok" if latest_value is not None else "no_data",
+            "value": _to_int(latest_value, default=None),
+            "charged": _to_int(entry.get("charged"), default=None),
+            "drained": _to_int(entry.get("drained"), default=None),
         }
 
     def get_vo2max(self, today: date, max_lookback_days: int = 7) -> dict[str, Any]:
@@ -158,11 +164,12 @@ class GarminClient:
             cycling_vo2 = cycling.get("vo2MaxValue") or cycling.get("vo2MaxPreciseValue")
             if running_vo2 is not None or cycling_vo2 is not None:
                 return {
+                    "status": "ok",
                     "date": d.isoformat(),
                     "running_vo2max": _to_int(running_vo2, default=None),
                     "cycling_vo2max": _to_int(cycling_vo2, default=None),
                 }
-        return {"date": today.isoformat(), "running_vo2max": None, "cycling_vo2max": None}
+        return {"status": "no_data", "date": today.isoformat(), "running_vo2max": None, "cycling_vo2max": None}
 
     def get_resting_hr(self, iso_date: str) -> dict[str, Any]:
         raw = self._call(self._garmin.get_rhr_day, iso_date)
@@ -172,18 +179,32 @@ class GarminClient:
         for point in series:
             if isinstance(point, dict) and point.get("value") is not None:
                 value = point["value"]
-        return {"resting_hr": _to_int(value, default=0)}
+        return {"status": "ok" if value is not None else "no_data", "resting_hr": _to_int(value, default=None)}
 
     def get_sleep(self, iso_date: str) -> dict[str, Any]:
         raw = self._call(self._garmin.get_sleep_data, iso_date)
         daily = (raw or {}).get("dailySleepDTO") or {}
 
-        def minutes(seconds_key: str) -> int:
+        def minutes(seconds_key: str) -> int | None:
             seconds = daily.get(seconds_key)
-            return int(seconds // 60) if isinstance(seconds, (int, float)) else 0
+            return int(seconds // 60) if isinstance(seconds, (int, float)) else None
 
         score = ((daily.get("sleepScores") or {}).get("overall") or {}).get("value")
+        # Nuit non (encore) synchronisée : Garmin renvoie un dailySleepDTO sans
+        # sleepTimeSeconds (ou à 0) — c'est une absence de donnée, pas une nuit de 0 min.
+        has_sleep = isinstance(daily.get("sleepTimeSeconds"), (int, float)) and daily["sleepTimeSeconds"] > 0
+        if not has_sleep:
+            return {
+                "status": "no_data",
+                "duration_minutes": None,
+                "deep_minutes": None,
+                "light_minutes": None,
+                "rem_minutes": None,
+                "awake_minutes": None,
+                "score": None,
+            }
         return {
+            "status": "ok",
             "duration_minutes": minutes("sleepTimeSeconds"),
             "deep_minutes": minutes("deepSleepSeconds"),
             "light_minutes": minutes("lightSleepSeconds"),
@@ -243,7 +264,7 @@ class GarminClient:
                     "date": act_date.isoformat(),
                     "type": normalized_type,
                     "garmin_type": type_key,
-                    "duration_minutes": int(duration_seconds // 60) if isinstance(duration_seconds, (int, float)) else 0,
+                    "duration_minutes": int(duration_seconds // 60) if isinstance(duration_seconds, (int, float)) else None,
                     "distance_km": round(distance_m / 1000, 2) if isinstance(distance_m, (int, float)) else None,
                     "avg_hr": _to_int(act.get("averageHR"), default=None),
                     "max_hr": _to_int(act.get("maxHR"), default=None),
@@ -272,10 +293,10 @@ class GarminClient:
         raw, found_date = self._fetch_training_status_with_fallback(today)
         device_entry = _first_device_status(raw)
         acute_dto = device_entry.get("acuteTrainingLoadDTO") or {}
-        acute = _to_int(acute_dto.get("dailyTrainingLoadAcute") or acute_dto.get("acuteTrainingLoad"), default=0)
-        chronic = _to_int(acute_dto.get("dailyTrainingLoadChronic") or acute_dto.get("chronicTrainingLoad"), default=0)
-        if chronic == 0:
-            ratio = 0.0
+        acute = _to_int(acute_dto.get("dailyTrainingLoadAcute") or acute_dto.get("acuteTrainingLoad"), default=None)
+        chronic = _to_int(acute_dto.get("dailyTrainingLoadChronic") or acute_dto.get("chronicTrainingLoad"), default=None)
+        if not chronic or acute is None:
+            ratio = None
             load_status = "no_status"
         else:
             ratio = round(acute / chronic, 2)
@@ -286,6 +307,7 @@ class GarminClient:
             else:
                 load_status = "optimal"
         return {
+            "status": "ok" if acute is not None or chronic is not None else "no_data",
             "date": found_date,
             "acute_load": acute,
             "chronic_load": chronic,
@@ -305,6 +327,7 @@ class GarminClient:
         device_map = (balance or {}).get("metricsTrainingLoadBalanceDTOMap") or {}
         entry = next(iter(device_map.values()), {}) if device_map else {}
         return {
+            "status": "ok" if entry else "no_data",
             "date": found_date,
             "aerobie_faible": _round_or_none(entry.get("monthlyLoadAerobicLow")),
             "aerobie_faible_cible_min": _to_int(entry.get("monthlyLoadAerobicLowTargetMin"), default=None),
@@ -343,7 +366,9 @@ class GarminClient:
         elif sport == "CYCLING":
             cycling_ftp = _to_int(power_data.get("functionalThresholdPower"), default=None)
 
+        has_data = any(v is not None for v in (hr, pace_min_per_km, running_power, cycling_ftp))
         return {
+            "status": "ok" if has_data else "no_data",
             "running": {
                 "heart_rate": _to_int(hr, default=None),
                 "pace_min_per_km": pace_min_per_km,
@@ -505,8 +530,10 @@ class GarminClient:
         week_end = week_start + timedelta(days=6)
         raw = self._call(self._garmin.get_weekly_intensity_minutes, week_start.isoformat(), week_end.isoformat())
         entries = raw if isinstance(raw, list) else []
-        moderate = sum(_to_int(e.get("moderateValue"), default=0) for e in entries if isinstance(e, dict))
-        vigorous = sum(_to_int(e.get("vigorousValue"), default=0) for e in entries if isinstance(e, dict))
+        dict_entries = [e for e in entries if isinstance(e, dict)]
+        # Aucune entrée = semaine sans donnée (null) ; entrées présentes = vrai total (0 possible).
+        moderate = sum(_to_int(e.get("moderateValue"), default=0) for e in dict_entries) if dict_entries else None
+        vigorous = sum(_to_int(e.get("vigorousValue"), default=0) for e in dict_entries) if dict_entries else None
 
         goal = 0
         for entry in entries:
@@ -520,7 +547,90 @@ class GarminClient:
             if isinstance(goal_raw, dict):
                 goal = _to_int(goal_raw.get("weekGoal") or goal_raw.get("weeklyGoal"), default=0)
 
-        return {"moderate_minutes": moderate, "vigorous_minutes": vigorous, "goal_minutes": goal}
+        return {
+            "status": "ok" if dict_entries else "no_data",
+            "moderate_minutes": moderate,
+            "vigorous_minutes": vigorous,
+            "goal_minutes": goal or None,
+        }
+
+    # -- état de santé du connecteur -----------------------------------------
+
+    def get_health(self, today: date) -> dict[str, Any]:
+        """Statut de connexion + fraîcheur des données (tool `garmin_health_check`).
+
+        Chaque sous-contrôle est isolé : un endpoint en erreur n'empêche pas les autres de
+        répondre. Formes des réponses `get_device_last_used` (`lastUsedDeviceUploadTime`,
+        epoch ms) et `sleepEndTimestampGMT` (epoch ms) : non encore confirmées sur un vrai
+        compte — parsing défensif, valeur null si la clé est absente.
+        """
+        iso_today = today.isoformat()
+        try:
+            self._ensure_login()
+        except Exception as exc:
+            return {"status": "error", "connection": {"status": "error", "message": str(exc)}}
+
+        def check(fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+            try:
+                return fn()
+            except Exception as exc:  # défensif : un sous-contrôle ne doit jamais tout casser
+                return {"status": "error", "message": str(exc)}
+
+        def last_sync() -> dict[str, Any]:
+            raw = self._call(self._garmin.get_device_last_used)
+            data = raw if isinstance(raw, dict) else {}
+            at = _epoch_ms_to_iso(data.get("lastUsedDeviceUploadTime"))
+            return {"status": "ok" if at else "no_data", "at": at, "device": data.get("lastUsedDeviceName")}
+
+        def last_activity() -> dict[str, Any]:
+            raw = self._call(self._garmin.get_activities, 0, 1)
+            acts = raw if isinstance(raw, list) else []
+            if not acts or not isinstance(acts[0], dict):
+                return {"status": "no_data", "activity_id": None, "start_local": None, "type": None}
+            act = acts[0]
+            type_key = (act.get("activityType") or {}).get("typeKey")
+            return {
+                "status": "ok",
+                "activity_id": act.get("activityId"),
+                "start_local": act.get("startTimeLocal"),
+                "type": ACTIVITY_TYPE_MAP.get(type_key, type_key),
+            }
+
+        def sleep() -> dict[str, Any]:
+            raw = self._call(self._garmin.get_sleep_data, iso_today)
+            daily = (raw or {}).get("dailySleepDTO") or {}
+            at = _epoch_ms_to_iso(daily.get("sleepEndTimestampGMT"))
+            has_sleep = isinstance(daily.get("sleepTimeSeconds"), (int, float)) and daily["sleepTimeSeconds"] > 0
+            return {"status": "ok" if has_sleep else "no_data", "sleep_end": at}
+
+        def body_battery() -> dict[str, Any]:
+            raw = self._call(self._garmin.get_body_battery, iso_today, iso_today)
+            entry = raw[0] if isinstance(raw, list) and raw else {}
+            points = [
+                p
+                for p in (entry.get("bodyBatteryValuesArray") or [])
+                if isinstance(p, (list, tuple)) and len(p) >= 2 and p[1] is not None
+            ]
+            at = _epoch_ms_to_iso(points[-1][0]) if points else None
+            return {"status": "ok" if points else "no_data", "last_point_at": at}
+
+        def resting_hr() -> dict[str, Any]:
+            data = self.get_resting_hr(iso_today)
+            return {"status": data["status"], "date": iso_today if data["status"] == "ok" else None}
+
+        result = {
+            "connection": {"status": "ok"},
+            "last_sync": check(last_sync),
+            "last_activity": check(last_activity),
+            "freshness": {
+                "sleep": check(sleep),
+                "body_battery": check(body_battery),
+                "resting_hr": check(resting_hr),
+            },
+        }
+        parts = [result["last_sync"], result["last_activity"], *result["freshness"].values()]
+        result["status"] = "error" if any(p["status"] == "error" for p in parts) else "ok"
+        return result
 
     # -- synchronisation complète -------------------------------------------
 
@@ -594,6 +704,13 @@ def _format_pace_mm_ss(decimal_minutes: float | None) -> str | None:
     total_seconds = round(decimal_minutes * 60)
     minutes, seconds = divmod(total_seconds, 60)
     return f"{minutes}:{seconds:02d}"
+
+
+def _epoch_ms_to_iso(value: Any) -> str | None:
+    """Timestamp Garmin en millisecondes epoch (UTC) -> ISO 8601 en Europe/Paris."""
+    if not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return datetime.fromtimestamp(value / 1000, tz=PARIS_TZ).isoformat()
 
 
 def _parse_garmin_gmt(value: Any) -> datetime | None:

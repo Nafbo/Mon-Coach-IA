@@ -227,7 +227,7 @@ async def test_resting_hr_authentication_error(tools: dict, fake_client: MagicMo
 
     result = await tools["garmin_get_resting_hr"]()
 
-    assert result == {"error": True, "message": "Identifiants Garmin invalides : bad creds"}
+    assert result == {"error": True, "status": "error", "message": "Identifiants Garmin invalides : bad creds"}
 
 
 async def test_sleep_unavailable_error(tools: dict, fake_client: MagicMock) -> None:
@@ -246,7 +246,7 @@ async def test_recent_activities_default_days(tools: dict, fake_client: MagicMoc
 
     result = await tools["garmin_get_recent_activities"]()
 
-    assert result == {"activities": fake_client.get_recent_activities.return_value}
+    assert result == {"status": "ok", "activities": fake_client.get_recent_activities.return_value}
     called_since, kwargs = fake_client.get_recent_activities.call_args
     assert called_since[0] == frozen_today - timedelta(days=7)
 
@@ -303,7 +303,7 @@ async def test_vo2max_uses_client_and_caches(tools: dict, fake_client: MagicMock
     first = await tools["garmin_get_vo2max"]()
     second = await tools["garmin_get_vo2max"]()
 
-    assert first == {"date": "2026-08-03", "running_vo2max": 52, "cycling_vo2max": None}
+    assert first == {"status": "ok", "date": "2026-08-03", "running_vo2max": 52, "cycling_vo2max": None}
     assert second == first
     fake_client.get_vo2max.assert_called_once_with(frozen_today)
 
@@ -339,7 +339,7 @@ def test_get_training_status_parses_acute_chronic_load(client: GarminClient) -> 
 
     result = client.get_training_status(date(2026, 8, 5))
 
-    assert result == {"date": "2026-08-05", "status": "PRODUCTIVE_1", "acute_load": 480, "chronic_load": 410}
+    assert result == {"status": "ok", "date": "2026-08-05", "training_status": "PRODUCTIVE_1", "acute_load": 480, "chronic_load": 410}
 
 
 def test_get_training_status_missing_data_falls_back(client: GarminClient) -> None:
@@ -347,7 +347,7 @@ def test_get_training_status_missing_data_falls_back(client: GarminClient) -> No
 
     result = client.get_training_status(date(2026, 8, 5))
 
-    assert result == {"date": "2026-08-05", "status": "unknown", "acute_load": 0, "chronic_load": 0}
+    assert result == {"status": "no_data", "date": "2026-08-05", "training_status": None, "acute_load": None, "chronic_load": None}
 
 
 def test_get_training_status_looks_back_when_today_empty(client: GarminClient) -> None:
@@ -367,7 +367,7 @@ def test_get_training_status_looks_back_when_today_empty(client: GarminClient) -
     result = client.get_training_status(date(2026, 8, 5))
 
     assert result["date"] == "2026-08-03"
-    assert result["status"] == "PRODUCTIVE_2"
+    assert result["training_status"] == "PRODUCTIVE_2"
     assert client._garmin.get_training_status.call_count == 3  # 05, 04, puis 03 (trouvé)
 
 
@@ -382,7 +382,7 @@ def test_get_body_battery_reads_latest_value_from_array(client: GarminClient) ->
 
     result = client.get_body_battery("2026-08-05")
 
-    assert result == {"value": 58, "charged": 45, "drained": 60}
+    assert result == {"status": "ok", "value": 58, "charged": 45, "drained": 60}
 
 
 def test_get_sleep_converts_seconds_to_minutes(client: GarminClient) -> None:
@@ -400,6 +400,7 @@ def test_get_sleep_converts_seconds_to_minutes(client: GarminClient) -> None:
     result = client.get_sleep("2026-08-05")
 
     assert result == {
+        "status": "ok",
         "duration_minutes": 420,
         "deep_minutes": 90,
         "light_minutes": 233,
@@ -548,7 +549,7 @@ def test_get_intensity_minutes_reads_goal_from_weekly_entry(client: GarminClient
 
     result = client.get_intensity_minutes(date(2026, 8, 3))
 
-    assert result == {"moderate_minutes": 5, "vigorous_minutes": 36, "goal_minutes": 150}
+    assert result == {"status": "ok", "moderate_minutes": 5, "vigorous_minutes": 36, "goal_minutes": 150}
     client._garmin.get_intensity_minutes_data.assert_not_called()
 
 
@@ -562,7 +563,7 @@ def test_get_intensity_minutes_falls_back_to_daily_week_goal_field(client: Garmi
 
     result = client.get_intensity_minutes(date(2026, 8, 3))
 
-    assert result == {"moderate_minutes": 5, "vigorous_minutes": 36, "goal_minutes": 150}
+    assert result == {"status": "ok", "moderate_minutes": 5, "vigorous_minutes": 36, "goal_minutes": 150}
 
 
 def test_get_training_load_status_classification(client: GarminClient) -> None:
@@ -613,10 +614,11 @@ def test_get_training_load_no_chronic_data_is_no_status(client: GarminClient) ->
     result = client.get_training_load(date(2026, 8, 5))
 
     assert result == {
+        "status": "no_data",
         "date": "2026-08-05",
-        "acute_load": 0,
-        "chronic_load": 0,
-        "load_ratio": 0.0,
+        "acute_load": None,
+        "chronic_load": None,
+        "load_ratio": None,
         "load_status": "no_status",
         "cible_charge_chronique_min": None,
         "cible_charge_chronique_max": None,
@@ -650,6 +652,7 @@ def test_get_training_load_balance_parses_real_shape(client: GarminClient) -> No
     result = client.get_training_load_balance(date(2026, 8, 5))
 
     assert result == {
+        "status": "ok",
         "date": "2026-08-05",
         "aerobie_faible": 392.6,
         "aerobie_faible_cible_min": 305,
@@ -670,6 +673,7 @@ def test_get_training_load_balance_missing_data(client: GarminClient) -> None:
     result = client.get_training_load_balance(date(2026, 8, 5))
 
     assert result == {
+        "status": "no_data",
         "date": "2026-08-05",
         "aerobie_faible": None,
         "aerobie_faible_cible_min": None,
@@ -690,6 +694,7 @@ def test_get_lactate_threshold_handles_missing_values(client: GarminClient) -> N
     result = client.get_lactate_threshold()
 
     assert result == {
+        "status": "no_data",
         "running": {"heart_rate": None, "pace_min_per_km": None, "power_watts": None, "power_watts_per_kg": None},
         "cycling": {"ftp_watts": None},
     }
@@ -740,7 +745,7 @@ def test_get_vo2max_reads_generic_and_cycling(client: GarminClient) -> None:
 
     result = client.get_vo2max(date(2026, 8, 5))
 
-    assert result == {"date": "2026-08-05", "running_vo2max": 52, "cycling_vo2max": 48}
+    assert result == {"status": "ok", "date": "2026-08-05", "running_vo2max": 52, "cycling_vo2max": 48}
 
 
 def test_get_vo2max_looks_back_when_today_empty(client: GarminClient) -> None:
@@ -753,7 +758,7 @@ def test_get_vo2max_looks_back_when_today_empty(client: GarminClient) -> None:
 
     result = client.get_vo2max(date(2026, 8, 5))
 
-    assert result == {"date": "2026-08-03", "running_vo2max": 52, "cycling_vo2max": None}
+    assert result == {"status": "ok", "date": "2026-08-03", "running_vo2max": 52, "cycling_vo2max": None}
     assert client._garmin.get_max_metrics.call_count == 3  # 05, 04, puis 03 (trouvé)
 
 
@@ -762,7 +767,7 @@ def test_get_vo2max_no_data_within_lookback_returns_nulls(client: GarminClient) 
 
     result = client.get_vo2max(date(2026, 8, 5))
 
-    assert result == {"date": "2026-08-05", "running_vo2max": None, "cycling_vo2max": None}
+    assert result == {"status": "no_data", "date": "2026-08-05", "running_vo2max": None, "cycling_vo2max": None}
 
 
 # ---------------------------------------------------------------------------
@@ -777,7 +782,7 @@ async def test_activity_weather_fetches_then_caches_without_expiry(tools: dict, 
     first = await tools["garmin_get_activity_weather"]("24040147871")
     second = await tools["garmin_get_activity_weather"]("24040147871")
 
-    assert first == {"temp_celsius": 18.9, "condition": "Light Rain"}
+    assert first == {"status": "ok", "temp_celsius": 18.9, "condition": "Light Rain"}
     assert second == first
     fake_client.get_activity_weather.assert_called_once_with("24040147871")
 
@@ -796,7 +801,7 @@ async def test_activity_weather_cache_ignores_freshness_window(
 
     result = await tools["garmin_get_activity_weather"]("999")
 
-    assert result == {"temp_celsius": 12.0}
+    assert result == {"status": "ok", "temp_celsius": 12.0}
     fake_client.get_activity_weather.assert_not_called()
 
 
@@ -836,7 +841,7 @@ async def test_activity_details_cache_ignores_freshness_window(
 
     result = await tools["garmin_get_activity_details"]("999")
 
-    assert result == {"time_s": [0]}
+    assert result == {"status": "ok", "time_s": [0]}
     fake_client.get_activity_details.assert_not_called()
 
 
@@ -845,7 +850,7 @@ async def test_activity_details_error_handling(tools: dict, fake_client: MagicMo
 
     result = await tools["garmin_get_activity_details"]("1")
 
-    assert result == {"error": True, "message": "Identifiants Garmin invalides : bad creds"}
+    assert result == {"error": True, "status": "error", "message": "Identifiants Garmin invalides : bad creds"}
 
 
 # ---------------------------------------------------------------------------
@@ -982,7 +987,7 @@ async def test_list_workouts_default_window_queries_expected_months(tools: dict,
 
     result = await tools["garmin_list_workouts"]()
 
-    assert result == {"workouts": []}
+    assert result == {"status": "ok", "workouts": []}
     fake_client.get_scheduled_workouts.assert_has_calls(
         [call(2026, 7), call(2026, 8), call(2026, 9), call(2026, 10)], any_order=False
     )
@@ -1012,6 +1017,7 @@ async def test_list_workouts_returns_only_pushed_workouts(tools: dict, fake_clie
     result = await tools["garmin_list_workouts"]()
 
     assert result == {
+        "status": "ok",
         "workouts": [{"workout_id": 111, "name": "24/08 - Fractionné VMA 6x400", "date": "2026-08-24", "discipline": "course"}]
     }
 
@@ -1353,7 +1359,7 @@ async def test_swim_splits_tool_fetches_then_caches_without_expiry(tools: dict, 
     first = await tools["garmin_get_swim_splits"]("24052008564")
     second = await tools["garmin_get_swim_splits"]("24052008564")
 
-    assert first == {"splits": fake_client.get_swim_splits.return_value}
+    assert first == {"status": "ok", "splits": fake_client.get_swim_splits.return_value}
     assert second == first
     fake_client.get_swim_splits.assert_called_once_with("24052008564")
 
@@ -1370,7 +1376,7 @@ async def test_swim_splits_tool_cache_ignores_freshness_window(
 
     result = await tools["garmin_get_swim_splits"]("999")
 
-    assert result == {"splits": []}
+    assert result == {"status": "ok", "splits": []}
     fake_client.get_swim_splits.assert_not_called()
 
 

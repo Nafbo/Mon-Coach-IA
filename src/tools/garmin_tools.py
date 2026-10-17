@@ -49,6 +49,12 @@ def _parse_date(date_str: str | None) -> date:
     return date.fromisoformat(date_str)
 
 
+def _error(message: str) -> dict[str, Any]:
+    """Réponse d'erreur commune à tous les tools : `status` "error" (P3) + `error`/`message`
+    historiques, conservés pour la rétrocompatibilité."""
+    return {"error": True, "status": "error", "message": message}
+
+
 def _garmin_error_message(exc: Exception) -> str:
     if isinstance(exc, GarminAuthenticationError):
         return f"Identifiants Garmin invalides : {exc}"
@@ -150,7 +156,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
             payloads = client.sync_all(today)
         except Exception as exc:
             logger.warning("garmin_sync failed: %s", exc)
-            return {"error": True, "message": f"Impossible de se connecter à Garmin Connect: {exc}"}
+            return _error(f"Impossible de se connecter à Garmin Connect: {exc}")
 
         date_keys = {
             "training_status": today.isoformat(),
@@ -165,145 +171,164 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
             "intensity_minutes": week_start.isoformat(),
         }
         for type_, payload in payloads.items():
+            # Pas de mise en cache d'une absence de donnée (cf. _fetch_cached).
+            if isinstance(payload, dict) and payload.get("status") == "no_data":
+                continue
             _store_cache(conn, type_, date_keys[type_], payload)
 
         synced_at = now_paris().isoformat()
         return {"status": "ok", "synced_at": synced_at}
 
-    async def garmin_get_training_status() -> dict[str, Any]:
-        today = today_paris()
-        cached = _get_cached(conn, "training_status", today.isoformat())
+    def _fetch_cached(
+        type_: str,
+        key: str,
+        fetch: Callable[[], dict[str, Any]],
+        *,
+        ignore_freshness: bool = False,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Lecture cache -> sinon appel Garmin, avec le champ `status` commun (P3).
+
+        Une réponse `no_data` n'est PAS mise en cache : une donnée qui arrive en retard
+        (synchro tardive de la montre) doit apparaître dès l'appel suivant, pas une heure
+        plus tard. Les payloads mis en cache avant l'ajout de `status` reçoivent "ok".
+        """
+        cached = None if force_refresh else _get_cached(conn, type_, key, ignore_freshness=ignore_freshness)
         if cached is None:
             try:
-                cached = client.get_training_status(today)
+                cached = fetch()
             except Exception as exc:
-                return {"error": True, "message": _garmin_error_message(exc)}
-            _store_cache(conn, "training_status", today.isoformat(), cached)
-        return cached
+                return _error(_garmin_error_message(exc))
+            if cached.get("status") != "no_data":
+                _store_cache(conn, type_, key, cached)
+        return {"status": "ok", **cached}
 
-    async def garmin_get_body_battery(date: str | None = None) -> dict[str, Any]:
+    async def garmin_get_training_status(force_refresh: bool = False) -> dict[str, Any]:
+        """Statut d'entraînement Garmin : `training_status` (libellé Garmin, ex.
+        "PRODUCTIVE_1"), `acute_load`, `chronic_load`, `date` (date réelle des données, jusqu'à
+        7 jours en arrière). `status` : "ok" | "no_data" | erreur."""
+        today = today_paris()
+        return _fetch_cached(
+            "training_status", today.isoformat(), lambda: client.get_training_status(today), force_refresh=force_refresh
+        )
+
+    async def garmin_get_body_battery(date: str | None = None, force_refresh: bool = False) -> dict[str, Any]:
+        """Body Battery du jour (`date` YYYY-MM-DD, défaut aujourd'hui). `status` : "ok" |
+        "no_data" (aucun point mesuré, valeurs null) | erreur."""
         try:
             target_date = _parse_date(date)
         except ValueError:
-            return {"error": True, "message": f"Date invalide : {date}"}
-        cached = _get_cached(conn, "body_battery", target_date.isoformat())
-        if cached is None:
-            try:
-                cached = client.get_body_battery(target_date.isoformat())
-            except Exception as exc:
-                return {"error": True, "message": _garmin_error_message(exc)}
-            _store_cache(conn, "body_battery", target_date.isoformat(), cached)
-        return {"date": target_date.isoformat(), **cached}
+            return _error(f"Date invalide : {date}")
+        iso = target_date.isoformat()
+        result = _fetch_cached("body_battery", iso, lambda: client.get_body_battery(iso), force_refresh=force_refresh)
+        return result if result.get("error") else {"date": iso, **result}
 
-    async def garmin_get_vo2max() -> dict[str, Any]:
+    async def garmin_get_vo2max(force_refresh: bool = False) -> dict[str, Any]:
+        """VO2max course (`running_vo2max`) et vélo (`cycling_vo2max`), `date` réelle de la
+        dernière valeur (jusqu'à 7 jours en arrière). `status` : "ok" | "no_data" | erreur."""
         today = today_paris()
-        cached = _get_cached(conn, "vo2max", today.isoformat())
-        if cached is None:
-            try:
-                cached = client.get_vo2max(today)
-            except Exception as exc:
-                return {"error": True, "message": _garmin_error_message(exc)}
-            _store_cache(conn, "vo2max", today.isoformat(), cached)
-        return cached
+        return _fetch_cached("vo2max", today.isoformat(), lambda: client.get_vo2max(today), force_refresh=force_refresh)
 
-    async def garmin_get_resting_hr(date: str | None = None) -> dict[str, Any]:
+    async def garmin_get_resting_hr(date: str | None = None, force_refresh: bool = False) -> dict[str, Any]:
+        """FC de repos (bpm) du jour (`date` YYYY-MM-DD, défaut aujourd'hui). `status` :
+        "ok" | "no_data" (`resting_hr` null) | erreur."""
         try:
             target_date = _parse_date(date)
         except ValueError:
-            return {"error": True, "message": f"Date invalide : {date}"}
-        cached = _get_cached(conn, "resting_hr", target_date.isoformat())
-        if cached is None:
-            try:
-                cached = client.get_resting_hr(target_date.isoformat())
-            except Exception as exc:
-                return {"error": True, "message": _garmin_error_message(exc)}
-            _store_cache(conn, "resting_hr", target_date.isoformat(), cached)
-        return {"date": target_date.isoformat(), **cached}
+            return _error(f"Date invalide : {date}")
+        iso = target_date.isoformat()
+        result = _fetch_cached("resting_hr", iso, lambda: client.get_resting_hr(iso), force_refresh=force_refresh)
+        return result if result.get("error") else {"date": iso, **result}
 
-    async def garmin_get_sleep(date: str | None = None) -> dict[str, Any]:
+    async def garmin_get_sleep(date: str | None = None, force_refresh: bool = False) -> dict[str, Any]:
+        """Nuit se terminant le jour `date` (YYYY-MM-DD, défaut aujourd'hui) : durées en
+        minutes (totale, profond, léger, paradoxal, éveillé) et `score`. `status` : "ok" |
+        "no_data" (nuit non synchronisée : toutes les valeurs null, jamais 0) | erreur."""
         try:
             target_date = _parse_date(date)
         except ValueError:
-            return {"error": True, "message": f"Date invalide : {date}"}
-        cached = _get_cached(conn, "sleep", target_date.isoformat())
-        if cached is None:
-            try:
-                cached = client.get_sleep(target_date.isoformat())
-            except Exception as exc:
-                return {"error": True, "message": _garmin_error_message(exc)}
-            _store_cache(conn, "sleep", target_date.isoformat(), cached)
-        return {"date": target_date.isoformat(), **cached}
+            return _error(f"Date invalide : {date}")
+        iso = target_date.isoformat()
+        result = _fetch_cached("sleep", iso, lambda: client.get_sleep(iso), force_refresh=force_refresh)
+        return result if result.get("error") else {"date": iso, **result}
 
-    async def garmin_get_recent_activities(days: int = 7) -> dict[str, Any]:
+    async def garmin_get_recent_activities(days: int = 7, force_refresh: bool = False) -> dict[str, Any]:
+        """Activités des `days` derniers jours (plus récentes en premier). `status` : "ok" |
+        "no_data" (aucune activité sur la période ; jamais mis en cache, pour voir tout de
+        suite une activité synchronisée en retard) | erreur."""
         today = today_paris()
-        cache_key = f"{today.isoformat()}:days={days}"
-        cached = _get_cached(conn, "recent_activities", cache_key)
-        if cached is None:
-            try:
-                activities = client.get_recent_activities(today - timedelta(days=days), fetch_limit=days * 4)
-            except Exception as exc:
-                return {"error": True, "message": _garmin_error_message(exc)}
-            cached = {"activities": activities}
-            _store_cache(conn, "recent_activities", cache_key, cached)
-        return cached
 
-    async def garmin_get_training_load() -> dict[str, Any]:
+        def fetch() -> dict[str, Any]:
+            activities = client.get_recent_activities(today - timedelta(days=days), fetch_limit=days * 4)
+            return {"status": "ok" if activities else "no_data", "activities": activities}
+
+        return _fetch_cached("recent_activities", f"{today.isoformat()}:days={days}", fetch, force_refresh=force_refresh)
+
+    async def garmin_get_training_load(force_refresh: bool = False) -> dict[str, Any]:
+        """Charge aiguë/chronique, ratio (null si pas de charge chronique), `load_status`
+        ("optimal" | "high" | "low" | "no_status"), cibles et ACWR. `status` : "ok" |
+        "no_data" | erreur."""
         today = today_paris()
-        cached = _get_cached(conn, "training_load", today.isoformat())
-        if cached is None:
-            try:
-                cached = client.get_training_load(today)
-            except Exception as exc:
-                return {"error": True, "message": _garmin_error_message(exc)}
-            _store_cache(conn, "training_load", today.isoformat(), cached)
-        return cached
+        return _fetch_cached(
+            "training_load", today.isoformat(), lambda: client.get_training_load(today), force_refresh=force_refresh
+        )
 
-    async def garmin_get_training_load_balance() -> dict[str, Any]:
+    async def garmin_get_training_load_balance(force_refresh: bool = False) -> dict[str, Any]:
+        """Charge mensuelle par filière (aérobie faible / élevée / anaérobie) et cibles.
+        `status` : "ok" | "no_data" | erreur."""
         today = today_paris()
-        cached = _get_cached(conn, "training_load_balance", today.isoformat())
-        if cached is None:
-            try:
-                cached = client.get_training_load_balance(today)
-            except Exception as exc:
-                return {"error": True, "message": _garmin_error_message(exc)}
-            _store_cache(conn, "training_load_balance", today.isoformat(), cached)
-        return cached
+        return _fetch_cached(
+            "training_load_balance",
+            today.isoformat(),
+            lambda: client.get_training_load_balance(today),
+            force_refresh=force_refresh,
+        )
 
-    async def garmin_get_lactate_threshold() -> dict[str, Any]:
+    async def garmin_get_lactate_threshold(force_refresh: bool = False) -> dict[str, Any]:
+        """Seuil lactique : course (FC, allure min/km, puissance) et FTP vélo. `status` :
+        "ok" | "no_data" | erreur."""
         today = today_paris()
-        cached = _get_cached(conn, "lactate_threshold", today.isoformat())
-        if cached is None:
-            try:
-                cached = client.get_lactate_threshold()
-            except Exception as exc:
-                return {"error": True, "message": _garmin_error_message(exc)}
-            _store_cache(conn, "lactate_threshold", today.isoformat(), cached)
-        return {"date": today.isoformat(), **cached}
+        result = _fetch_cached(
+            "lactate_threshold", today.isoformat(), client.get_lactate_threshold, force_refresh=force_refresh
+        )
+        return result if result.get("error") else {"date": today.isoformat(), **result}
 
-    async def garmin_get_intensity_minutes(week_start_date: str | None = None) -> dict[str, Any]:
+    async def garmin_get_intensity_minutes(
+        week_start_date: str | None = None, force_refresh: bool = False
+    ) -> dict[str, Any]:
+        """Minutes d'intensité modérées/vigoureuses de la semaine (lundi de `week_start_date`,
+        défaut semaine courante) et objectif. `status` : "ok" | "no_data" | erreur."""
         try:
             week_start = monday_of_week(_parse_date(week_start_date)) if week_start_date else monday_of_week(today_paris())
         except ValueError:
-            return {"error": True, "message": f"Date invalide : {week_start_date}"}
-        cached = _get_cached(conn, "intensity_minutes", week_start.isoformat())
-        if cached is None:
-            try:
-                cached = client.get_intensity_minutes(week_start)
-            except Exception as exc:
-                return {"error": True, "message": _garmin_error_message(exc)}
-            _store_cache(conn, "intensity_minutes", week_start.isoformat(), cached)
-        return {"week_start_date": week_start.isoformat(), **cached}
+            return _error(f"Date invalide : {week_start_date}")
+        result = _fetch_cached(
+            "intensity_minutes",
+            week_start.isoformat(),
+            lambda: client.get_intensity_minutes(week_start),
+            force_refresh=force_refresh,
+        )
+        return result if result.get("error") else {"week_start_date": week_start.isoformat(), **result}
 
     async def garmin_get_activity_weather(activity_id: str) -> dict[str, Any]:
+        """Météo d'une activité (cache sans expiration). `status` : "ok" | erreur."""
         key = str(activity_id)
-        cached = _get_cached(conn, "activity_weather", key, ignore_freshness=True)
-        if cached is None:
-            try:
-                cached = client.get_activity_weather(activity_id)
-            except Exception as exc:
-                return {"error": True, "message": _garmin_error_message(exc)}
-            _store_cache(conn, "activity_weather", key, cached)
-        return cached
+        return _fetch_cached(
+            "activity_weather", key, lambda: client.get_activity_weather(activity_id), ignore_freshness=True
+        )
+
+    async def garmin_health_check() -> dict[str, Any]:
+        """État du connecteur Garmin, à appeler en début de routine planifiée : `connection`
+        (login Garmin), `last_sync` (dernier envoi de la montre : `at` ISO Paris, `device`),
+        `last_activity` (dernière activité reçue : id, début, type), `freshness` par métrique
+        du jour (`sleep.sleep_end`, `body_battery.last_point_at`, `resting_hr.date`), chacun
+        avec son `status` ("ok" | "no_data" | "error" + `message`). Jamais mis en cache.
+        `checked_at` : horodatage du contrôle (Europe/Paris)."""
+        try:
+            health = client.get_health(today_paris())
+        except Exception as exc:
+            return _error(_garmin_error_message(exc))
+        return {"checked_at": now_paris().isoformat(), **health}
 
     def _activity_details(activity_id: str) -> dict[str, Any]:
         """Séries de l'activité (cache sans expiration : une activité passée ne change plus).
@@ -325,14 +350,14 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         `garmin_analyse_activity`, qui calcule côté serveur sans renvoyer les séries.
         """
         if resolution_s is not None and resolution_s < 1:
-            return {"error": True, "message": f"resolution_s doit être >= 1 (reçu : {resolution_s})"}
+            return _error(f"resolution_s doit être >= 1 (reçu : {resolution_s})")
         try:
             details = _activity_details(activity_id)
         except Exception as exc:
-            return {"error": True, "message": _garmin_error_message(exc)}
+            return _error(_garmin_error_message(exc))
         if resolution_s is not None and resolution_s > 1:
-            return downsample(details, resolution_s)
-        return details
+            details = downsample(details, resolution_s)
+        return {"status": "ok" if details.get("time_s") else "no_data", **details}
 
     async def garmin_analyse_activity(
         activity_id: str, fc_seuil: float, allure_cible: float | None = None, type: str = "auto"
@@ -355,26 +380,23 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         garmin_get_swim_splits) ou erreur (`error: true`, `message`).
         """
         if type not in ANALYSIS_TYPES:
-            return {"error": True, "message": f"type invalide : {type} (attendu : {', '.join(ANALYSIS_TYPES)})"}
+            return _error(f"type invalide : {type} (attendu : {', '.join(ANALYSIS_TYPES)})")
         if not fc_seuil or fc_seuil <= 0:
-            return {"error": True, "message": f"fc_seuil invalide : {fc_seuil}"}
+            return _error(f"fc_seuil invalide : {fc_seuil}")
         try:
             details = _activity_details(activity_id)
         except Exception as exc:
-            return {"error": True, "message": _garmin_error_message(exc)}
+            return _error(_garmin_error_message(exc))
         return {"activity_id": str(activity_id), **analyse(details, fc_seuil, allure_cible, type)}
 
     async def garmin_get_swim_splits(activity_id: str) -> dict[str, Any]:
         key = str(activity_id)
-        cached = _get_cached(conn, "swim_splits", key, ignore_freshness=True)
-        if cached is None:
-            try:
-                splits = client.get_swim_splits(activity_id)
-            except Exception as exc:
-                return {"error": True, "message": _garmin_error_message(exc)}
-            cached = {"splits": splits}
-            _store_cache(conn, "swim_splits", key, cached)
-        return cached
+
+        def fetch() -> dict[str, Any]:
+            splits = client.get_swim_splits(activity_id)
+            return {"status": "ok" if splits else "no_data", "splits": splits}
+
+        return _fetch_cached("swim_splits", key, fetch, ignore_freshness=True)
 
     async def garmin_push_workout(
         date: str, name: str, structure: dict[str, Any], dry_run: bool = True
@@ -438,7 +460,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         try:
             payload = build_workout(structure)
         except (KeyError, ValueError) as exc:
-            return {"error": True, "message": f"Structure de séance invalide : {exc}"}
+            return _error(f"Structure de séance invalide : {exc}")
         payload["workoutName"] = name
 
         if dry_run:
@@ -447,12 +469,12 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         try:
             target_date = _parse_date(date)
         except ValueError:
-            return {"error": True, "message": f"Date invalide : {date}"}
+            return _error(f"Date invalide : {date}")
 
         try:
             existing = client.get_scheduled_workouts(target_date.year, target_date.month)
         except Exception as exc:
-            return {"error": True, "message": _garmin_error_message(exc)}
+            return _error(_garmin_error_message(exc))
 
         duplicate = _find_duplicate_scheduled_workout(existing, name=name, date_str=date)
         if duplicate is not None:
@@ -461,12 +483,13 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         try:
             upload_result = client.upload_workout(payload)
         except Exception as exc:
-            return {"error": True, "message": _garmin_error_message(exc)}
+            return _error(_garmin_error_message(exc))
 
         workout_id = _extract_workout_id(upload_result)
         if workout_id is None:
             return {
                 "error": True,
+                "status": "error",
                 "message": f"Réponse d'upload inattendue, impossible d'y trouver un workout_id : {upload_result}",
             }
 
@@ -480,6 +503,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
 
         return {
             "error": True,
+            "status": "error",
             "message": (
                 f"Séance créée (workout_id={workout_id}) mais échec de la programmation "
                 f"après 3 tentatives : {last_exc}"
@@ -512,17 +536,17 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
             start = _parse_date(start_date) if start_date else today_paris() - timedelta(days=30)
             end = _parse_date(end_date) if end_date else today_paris() + timedelta(days=60)
         except ValueError:
-            return {"error": True, "message": f"Date invalide : {start_date or end_date}"}
+            return _error(f"Date invalide : {start_date or end_date}")
 
         if start > end:
-            return {"error": True, "message": f"start_date ({start}) postérieure à end_date ({end})"}
+            return _error(f"start_date ({start}) postérieure à end_date ({end})")
 
         workouts: dict[int, dict[str, Any]] = {}
         for year, month in _month_range(start, end):
             try:
                 raw = client.get_scheduled_workouts(year, month)
             except Exception as exc:
-                return {"error": True, "message": _garmin_error_message(exc)}
+                return _error(_garmin_error_message(exc))
             for entry in _iter_pushed_workout_entries(raw):
                 entry_date_str = entry.get("date") or entry.get("calendarDate")
                 try:
@@ -535,13 +559,13 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
                 if summary["workout_id"] is not None:
                     workouts[summary["workout_id"]] = summary
 
-        return {"workouts": sorted(workouts.values(), key=lambda w: w["date"] or "")}
+        return {"status": "ok", "workouts": sorted(workouts.values(), key=lambda w: w["date"] or "")}
 
     async def garmin_delete_workout(workout_id: int) -> dict[str, Any]:
         try:
             client.delete_workout(workout_id)
         except Exception as exc:
-            return {"error": True, "message": _garmin_error_message(exc)}
+            return _error(_garmin_error_message(exc))
         return {"status": "ok", "workout_id": workout_id}
 
     return {
@@ -563,4 +587,5 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         "garmin_push_workout": garmin_push_workout,
         "garmin_list_workouts": garmin_list_workouts,
         "garmin_delete_workout": garmin_delete_workout,
+        "garmin_health_check": garmin_health_check,
     }
