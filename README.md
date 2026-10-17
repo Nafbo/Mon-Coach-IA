@@ -141,11 +141,23 @@ L'analyse (`src/analysis/`) est testée hors ligne de deux façons :
   course 24725112038 (3306 s, pauses 2558→2692 s et 2832→2921 s) et nage 24748453127
   (72 × 25 m, longueurs 21 et 59 aberrantes) ; toujours exécutées ;
 - **séries réelles anonymisées** (`tests/fixtures/<activity_id>.json.gz`, GPS et identité
-  retirés), utilisées par `tests/test_reference_fixtures.py` et ignorées tant qu'elles
-  n'existent pas. Pour les (re)générer, avec un token Garmin valide (lecture seule) :
+  retirés) des deux activités de référence et du footing 24737274389 (sortie facile avec
+  9 arrêts, qui sert de garde-fou contre les faux blocs), utilisées par
+  `tests/test_reference_fixtures.py`. Ces fichiers contiennent des données de santé réelles :
+  ils sont **ignorés par git** (`tests/fixtures/` dans `.gitignore`) et restent sur le poste
+  local ; sans eux, ces tests sont simplement ignorés (`skipped`). Pour les (re)générer, avec un
+  token Garmin valide (lecture seule) :
 
 ```bash
 python scripts/capture_fixtures.py 24725112038 24748453127
+```
+
+Si le token local est refusé (erreur 401 "Failed to retrieve social profile"), le renouveler
+(identifiants du `.env`, code MFA demandé dans le terminal si besoin ; l'ancien token est mis
+de côté, pas supprimé) :
+
+```bash
+python scripts/garmin_login.py
 ```
 
 Vérification en direct sur le vrai compte (lecture seule) des corrections sur les deux

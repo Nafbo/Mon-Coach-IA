@@ -64,3 +64,54 @@ def test_ref_swim_72_lengths_and_suspects(tmp_path: Path) -> None:
     suspects = {s["length_idx"] for s in result["splits"] if s["suspect"]}
     assert {21, 59} <= suspects
     assert sum(b["nb_longueurs"] for b in result["blocks"]) == 72
+
+
+EASY_RUN_ID = "24737274389"  # footing du 15/10 : 6,05 km, 9 arrêts, 100 % Z1
+
+
+def test_ref_threshold_session_blocks(tmp_path: Path) -> None:
+    client = _client_from_fixture(RUN_ID, tmp_path)
+
+    result = an.analyse(client.get_activity_details(RUN_ID), fc_seuil=174)
+
+    long_blocks = [b for b in result["blocs"] if b["duree_s"] >= 300]
+    assert len(long_blocks) == 3
+    for b in long_blocks:
+        assert 4.2 <= b["allure"] <= 4.4  # 4:12-4:24/km
+        assert b["fc_moy"] >= 160
+    assert len(json.dumps(result)) < 8000
+
+
+def test_ref_easy_run_with_stops_has_no_false_blocks(tmp_path: Path) -> None:
+    client = _client_from_fixture(EASY_RUN_ID, tmp_path)
+    summary = json.loads(gzip.open(FIXTURES / f"{EASY_RUN_ID}.json.gz", "rt").read())["activity"]["summaryDTO"]
+
+    result = an.analyse(client.get_activity_details(EASY_RUN_ID), fc_seuil=174)
+    vue = result["vue_ensemble"]
+
+    assert result["blocs"] == []
+    assert vue["seance_continue"] is True
+    assert len(vue["pauses"]) == 9
+    assert vue["duree_ecoulee_s"] == pytest.approx(summary["elapsedDuration"], abs=2)
+    assert vue["duree_mouvement_s"] == pytest.approx(summary["movingDuration"], abs=40)
+    assert vue["distance_km"] == pytest.approx(summary["distance"] / 1000, abs=0.02)
+    # Forcer le type reste possible.
+    assert an.analyse(client.get_activity_details(EASY_RUN_ID), 174, type="fractionne")["blocs"]
+
+
+def test_ref_easy_run_empty_weather_is_no_data(tmp_path: Path) -> None:
+    client = _client_from_fixture(EASY_RUN_ID, tmp_path)
+    client._garmin.get_activity_weather.return_value = {
+        "temp": None,
+        "windSpeed": None,
+        "latitude": 0.0,
+        "longitude": 0.0,
+        "weatherStationDTO": None,
+        "weatherTypeDTO": None,
+    }
+
+    weather = client.get_activity_weather(EASY_RUN_ID)
+
+    assert weather["status"] == "no_data"
+    assert weather["station_distance_km"] is None
+    assert weather["station_far"] is None

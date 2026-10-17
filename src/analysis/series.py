@@ -29,6 +29,13 @@ _MIN_DECOUPLING_S = 2400
 # Écart minimal entre allure d'effort et allure de récup, et part minimale de chaque groupe.
 _MIN_CLUSTER_GAP_MIN_KM = 20 / 60
 _MIN_CLUSTER_SHARE = 0.10
+# Sur une sortie facile entrecoupée d'arrêts (feux, pauses), l'allure est bimodale sans qu'il
+# y ait d'effort : en mode "auto", les blocs ne sont retenus que si leur FC moyenne dépasse
+# d'au moins 10 bpm celle du reste de la séance, ou si l'écart d'allure atteint 60 s/km
+# (efforts courts type 30/30, où la FC n'a pas le temps de monter). Validé sur séries réelles :
+# seuil 3 × 6'30 (24725112038) -> +29 bpm ; footing avec arrêts (24737274389) -> +7 bpm.
+_MIN_BLOCK_HR_CONTRAST_BPM = 10
+_STRONG_PACE_GAP_MIN_KM = 60 / 60
 # Bornes Friel en fraction de la FC seuil.
 _ZONE_BOUNDS = [0.85, 0.90, 0.95, 1.00, 1.03]
 _ZONE_NAMES = ["Z1 recup", "Z2 endurance", "Z3 tempo", "Z4 seuil", "Z5a", "Z5b+"]
@@ -243,6 +250,18 @@ def _recoveries(t: list[int], hr: list, blocks: list[tuple[int, int]]) -> list[d
     return out
 
 
+def _hr_contrast(hr: list, blocks: list[tuple[int, int]]) -> float | None:
+    """FC moyenne dans les blocs moins FC moyenne hors blocs (bpm), None sans FC."""
+    inside = set()
+    for i, j in blocks:
+        inside.update(range(i, j + 1))
+    hr_in = [hr[k] for k in inside if hr[k]]
+    hr_out = [hr[k] for k in range(len(hr)) if k not in inside and hr[k]]
+    if not hr_in or not hr_out:
+        return None
+    return st.mean(hr_in) - st.mean(hr_out)
+
+
 def _is_bimodal(paces: list[float], fast: float, slow: float) -> bool:
     """Vrai si la série contient réellement deux régimes (effort / récup) : centres écartés
     d'au moins 20 s/km et chaque groupe >= 10 % des points."""
@@ -307,6 +326,10 @@ def analyse(
         for i, j in segs:
             blocks += [(i + a, i + b) for a, b in effort_blocks(t[i : j + 1], pace_smooth[i : j + 1], threshold)]
         blocks.sort()
+        if type == "auto" and blocks and slow - fast < _STRONG_PACE_GAP_MIN_KM:
+            contrast = _hr_contrast(hr, blocks)
+            if contrast is not None and contrast < _MIN_BLOCK_HR_CONTRAST_BPM:
+                blocks = []
 
     block_list = []
     for n, (i, j) in enumerate(blocks, 1):

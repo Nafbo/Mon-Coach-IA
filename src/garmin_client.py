@@ -456,16 +456,24 @@ class GarminClient:
 
         # Distance station <-> départ de la séance. Coordonnées de la station : celles du
         # payload météo si présentes, sinon table OACI locale ; départ : résumé d'activité.
+        # Sans météo, Garmin renvoie un payload à null avec latitude/longitude = 0.0 (observé
+        # sur 24737274389) : (0, 0) n'est pas une position, sinon distance "station" absurde.
         station_lat, station_lon = data.get("latitude"), data.get("longitude")
-        if not isinstance(station_lat, (int, float)) or not isinstance(station_lon, (int, float)):
+        if (
+            not isinstance(station_lat, (int, float))
+            or not isinstance(station_lon, (int, float))
+            or (station_lat == 0 and station_lon == 0)
+        ):
             station_lat, station_lon = _STATION_COORDS.get(str(station.get("id") or "").upper(), (None, None))
-        start_lat, start_lon = self._activity_start(activity_id)
+        has_weather = data.get("temp") is not None or bool(station)
+        start_lat, start_lon = self._activity_start(activity_id) if has_weather else (None, None)
         distance_km = (
             round(_haversine_km(station_lat, station_lon, start_lat, start_lon), 1)
             if None not in (station_lat, station_lon, start_lat, start_lon)
             else None
         )
         return {
+            "status": "ok" if has_weather else "no_data",
             # temp/apparentTemp/dewPoint : observés en °F sur un vrai compte (66 pour une
             # soirée d'août pluvieuse à Paris - incohérent en °C) — convertis en °C.
             "temp_celsius": _fahrenheit_to_celsius(data.get("temp")),

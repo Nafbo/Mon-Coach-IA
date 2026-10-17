@@ -9,6 +9,9 @@ __pycache__/
 *.pyo
 .pytest_cache/
 data/
+config/
+# Séries Garmin réelles (FC, allure) : données de santé, gardées en local uniquement
+tests/fixtures/
 *.db
 *.db-journal
 *.egg-info/
