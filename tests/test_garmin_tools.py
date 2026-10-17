@@ -382,7 +382,15 @@ def test_get_body_battery_reads_latest_value_from_array(client: GarminClient) ->
 
     result = client.get_body_battery("2026-08-05")
 
-    assert result == {"status": "ok", "value": 58, "charged": 45, "drained": 60}
+    assert result["status"] == "ok"
+    assert {k: result[k] for k in ("value", "charged", "drained", "latest", "min", "max")} == {
+        "value": 58,
+        "charged": 45,
+        "drained": 60,
+        "latest": 58,
+        "min": 58,
+        "max": 70,
+    }
 
 
 def test_get_sleep_converts_seconds_to_minutes(client: GarminClient) -> None:
@@ -695,7 +703,7 @@ def test_get_lactate_threshold_handles_missing_values(client: GarminClient) -> N
 
     assert result == {
         "status": "no_data",
-        "running": {"heart_rate": None, "pace_min_per_km": None, "power_watts": None, "power_watts_per_kg": None},
+        "running": {"heart_rate": None, "pace_min_per_km": None, "pace_mmss": None, "power_watts": None, "power_watts_per_kg": None},
         "cycling": {"ftp_watts": None},
     }
 
@@ -795,7 +803,7 @@ async def test_activity_weather_cache_ignores_freshness_window(
     stale_time = (datetime.now(PARIS_TZ) - timedelta(hours=5)).isoformat()
     conn.execute(
         "INSERT INTO garmin_cache (date, type, payload_json, fetched_at) VALUES (?, ?, ?, ?)",
-        ("999", "activity_weather", '{"temp_celsius": 12.0}', stale_time),
+        ("999", "activity_weather_v2", '{"temp_celsius": 12.0}', stale_time),
     )
     conn.commit()
 
@@ -841,7 +849,7 @@ async def test_activity_details_cache_ignores_freshness_window(
 
     result = await tools["garmin_get_activity_details"]("999")
 
-    assert result == {"status": "ok", "time_s": [0]}
+    assert result == {"status": "ok", "elapsed_s": 0, "moving_s": 0, "pauses": [], "time_s": [0]}
     fake_client.get_activity_details.assert_not_called()
 
 

@@ -8,7 +8,7 @@ import sqlite3
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
-from src.analysis.series import ANALYSIS_TYPES, analyse, downsample
+from src.analysis.series import ANALYSIS_TYPES, analyse, downsample, moving_time, pauses
 from src.garmin_client import GarminAuthenticationError, GarminClient, GarminUnavailableError
 from src.models import monday_of_week, now_paris, today_paris
 from src.workout_builder import build_workout
@@ -213,8 +213,12 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         )
 
     async def garmin_get_body_battery(date: str | None = None, force_refresh: bool = False) -> dict[str, Any]:
-        """Body Battery du jour (`date` YYYY-MM-DD, défaut aujourd'hui). `status` : "ok" |
-        "no_data" (aucun point mesuré, valeurs null) | erreur."""
+        """Body Battery du jour (`date` YYYY-MM-DD, défaut aujourd'hui) : `at_wake` (niveau
+        au réveil), `min` / `max` (niveaux extrêmes de la journée), `latest` + `latest_at`
+        (dernier niveau mesuré et son horodatage), `charged` / `drained` (cumuls de points
+        rechargés / consommés sur la journée, pas des niveaux), `value` (= `latest`, conservé
+        pour compatibilité). Niveaux sur 0-100. `status` : "ok" | "no_data" (aucun point
+        mesuré, valeurs null) | erreur."""
         try:
             target_date = _parse_date(date)
         except ValueError:
@@ -230,15 +234,21 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         return _fetch_cached("vo2max", today.isoformat(), lambda: client.get_vo2max(today), force_refresh=force_refresh)
 
     async def garmin_get_resting_hr(date: str | None = None, force_refresh: bool = False) -> dict[str, Any]:
-        """FC de repos (bpm) du jour (`date` YYYY-MM-DD, défaut aujourd'hui). `status` :
-        "ok" | "no_data" (`resting_hr` null) | erreur."""
+        """FC de repos (bpm) du jour (`date` YYYY-MM-DD, défaut aujourd'hui), avec
+        `measured_on` (jour de la mesure), `last_sync_at` (dernière synchro montre prise en
+        compte, ISO Europe/Paris) et `provisoire` (true pour le jour en cours : valeur encore
+        susceptible d'être recalculée). `status` : "ok" | "no_data" (`resting_hr` null) | erreur."""
         try:
             target_date = _parse_date(date)
         except ValueError:
             return _error(f"Date invalide : {date}")
         iso = target_date.isoformat()
         result = _fetch_cached("resting_hr", iso, lambda: client.get_resting_hr(iso), force_refresh=force_refresh)
-        return result if result.get("error") else {"date": iso, **result}
+        if result.get("error"):
+            return result
+        # La FC repos du jour en cours est recalculée par Garmin au fil des synchros : une
+        # valeur lue le matin peut encore changer (cf. `last_sync_at`).
+        return {"date": iso, "provisoire": target_date == today_paris(), **result}
 
     async def garmin_get_sleep(date: str | None = None, force_refresh: bool = False) -> dict[str, Any]:
         """Nuit se terminant le jour `date` (YYYY-MM-DD, défaut aujourd'hui) : durées en
@@ -311,10 +321,18 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         return result if result.get("error") else {"week_start_date": week_start.isoformat(), **result}
 
     async def garmin_get_activity_weather(activity_id: str) -> dict[str, Any]:
-        """Météo d'une activité (cache sans expiration). `status` : "ok" | erreur."""
+        """Météo d'une activité : températures en °C, `humidity_percent`, vent
+        `wind_speed_kmh` / `wind_gust_kmh` (km/h, convertis depuis des mph supposés, cf.
+        `wind_unit_source` ; rafale null = aucune rafale signalée), `wind_direction_compass`,
+        `condition`, station (`station_name`, `station_id`, `station_distance_km` entre la
+        station et le départ, `station_far` true au-delà de 15 km : mesure peu
+        représentative). Les champs `*_raw` historiques sont conservés. Cache sans
+        expiration. `status` : "ok" | erreur."""
         key = str(activity_id)
+        # Clé versionnée : les payloads v1 (sans km/h ni distance station) restent en base
+        # mais ne sont plus servis.
         return _fetch_cached(
-            "activity_weather", key, lambda: client.get_activity_weather(activity_id), ignore_freshness=True
+            "activity_weather_v2", key, lambda: client.get_activity_weather(activity_id), ignore_freshness=True
         )
 
     async def garmin_health_check() -> dict[str, Any]:
@@ -355,9 +373,17 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
             details = _activity_details(activity_id)
         except Exception as exc:
             return _error(_garmin_error_message(exc))
+        # Pauses et temps en mouvement calculés sur la série complète (avant
+        # sous-échantillonnage) : un trou de plus de 15 s entre deux points = pause montre.
+        t = [x for x in details.get("time_s") or [] if x is not None]
+        timing = {
+            "elapsed_s": t[-1] - t[0] if t else None,
+            "moving_s": moving_time(t) if t else None,
+            "pauses": pauses(t),
+        }
         if resolution_s is not None and resolution_s > 1:
             details = downsample(details, resolution_s)
-        return {"status": "ok" if details.get("time_s") else "no_data", **details}
+        return {"status": "ok" if t else "no_data", **timing, **details}
 
     async def garmin_analyse_activity(
         activity_id: str, fc_seuil: float, allure_cible: float | None = None, type: str = "auto"

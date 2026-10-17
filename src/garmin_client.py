@@ -10,7 +10,8 @@ inspecter le contenu brut de `garmin_cache` pour confirmer/ajuster le parsing si
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+import math
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, TypeVar
 
 from garminconnect import (
@@ -134,20 +135,58 @@ class GarminClient:
             "chronic_load": _to_int(chronic, default=None),
         }
 
+    def _user_summary(self, iso_date: str) -> dict[str, Any]:
+        """Résumé quotidien Garmin (`get_user_summary`), utilisé en complément (valeur au
+        réveil, dernière synchro). Jamais bloquant : {} en cas d'erreur ou de forme
+        inattendue — les champs qui en dépendent valent alors null."""
+        try:
+            raw = self._call(self._garmin.get_user_summary, iso_date)
+        except Exception as exc:  # défensif : donnée complémentaire, pas critique
+            logger.info("get_user_summary(%s) indisponible : %s", iso_date, exc)
+            return {}
+        return raw if isinstance(raw, dict) else {}
+
     def get_body_battery(self, iso_date: str) -> dict[str, Any]:
+        """Body Battery de la journée.
+
+        - `value` : dernière valeur mesurée de la journée (= `latest`, conservé pour compat.) ;
+        - `charged` / `drained` : total de points rechargés / consommés sur la journée
+          (cumuls Garmin, pas des niveaux) ;
+        - `at_wake` : niveau au réveil (résumé quotidien Garmin, null si indisponible) ;
+        - `min` / `max` : niveaux extrêmes mesurés sur la journée ;
+        - `latest_at` : horodatage (ISO Europe/Paris) de la dernière valeur.
+        """
         raw = self._call(self._garmin.get_body_battery, iso_date, iso_date)
         entry = raw[0] if isinstance(raw, list) and raw else {}
-        values = entry.get("bodyBatteryValuesArray") or []
-        latest_value = None
-        for point in reversed(values):
-            if isinstance(point, (list, tuple)) and len(point) >= 2 and point[1] is not None:
-                latest_value = point[1]
-                break
+        points = [
+            p
+            for p in (entry.get("bodyBatteryValuesArray") or [])
+            if isinstance(p, (list, tuple)) and len(p) >= 2 and p[1] is not None
+        ]
+        if not points:
+            return {
+                "status": "no_data",
+                "value": None,
+                "charged": None,
+                "drained": None,
+                "at_wake": None,
+                "min": None,
+                "max": None,
+                "latest": None,
+                "latest_at": None,
+            }
+        levels = [p[1] for p in points]
+        summary = self._user_summary(iso_date)
         return {
-            "status": "ok" if latest_value is not None else "no_data",
-            "value": _to_int(latest_value, default=None),
+            "status": "ok",
+            "value": _to_int(levels[-1], default=None),
             "charged": _to_int(entry.get("charged"), default=None),
             "drained": _to_int(entry.get("drained"), default=None),
+            "at_wake": _to_int(summary.get("bodyBatteryAtWakeTime"), default=None),
+            "min": _to_int(min(levels), default=None),
+            "max": _to_int(max(levels), default=None),
+            "latest": _to_int(levels[-1], default=None),
+            "latest_at": _epoch_ms_to_iso(points[-1][0]),
         }
 
     def get_vo2max(self, today: date, max_lookback_days: int = 7) -> dict[str, Any]:
@@ -176,10 +215,22 @@ class GarminClient:
         metrics = ((raw or {}).get("allMetrics") or {}).get("metricsMap") or {}
         series = metrics.get("WELLNESS_RESTING_HEART_RATE") or []
         value = None
+        measured_on = None
         for point in series:
             if isinstance(point, dict) and point.get("value") is not None:
                 value = point["value"]
-        return {"status": "ok" if value is not None else "no_data", "resting_hr": _to_int(value, default=None)}
+                measured_on = point.get("calendarDate") or iso_date
+        if value is None:
+            return {"status": "no_data", "resting_hr": None, "measured_on": None, "last_sync_at": None}
+        # La FC repos du jour est recalculée par Garmin au fil des synchros : `last_sync_at`
+        # dit sur quelles données la valeur repose (une valeur du matin peut encore bouger).
+        summary = self._user_summary(iso_date)
+        return {
+            "status": "ok",
+            "resting_hr": _to_int(value, default=None),
+            "measured_on": measured_on,
+            "last_sync_at": _garmin_timestamp_to_iso(summary.get("lastSyncTimestampGMT")),
+        }
 
     def get_sleep(self, iso_date: str) -> dict[str, Any]:
         raw = self._call(self._garmin.get_sleep_data, iso_date)
@@ -270,7 +321,9 @@ class GarminClient:
                     "max_hr": _to_int(act.get("maxHR"), default=None),
                     "denivele_m": _to_int(elevation_gain, default=None),
                     "allure_moyenne_min_km": allure_moyenne,
+                    "allure_moyenne_mmss": _format_pace_mm_ss(allure_moyenne),
                     "allure_rapide_min_km": allure_rapide,
+                    "allure_rapide_mmss": _format_pace_mm_ss(allure_rapide),
                     "effet_entrainement": act.get("trainingEffectLabel"),
                     "effet_aerobie": _round_or_none(act.get("aerobicTrainingEffect")),
                     "effet_aerobie_message": act.get("aerobicTrainingEffectMessage"),
@@ -284,6 +337,7 @@ class GarminClient:
                     "brasses_total": brasses_total,
                     "meilleur_100m_sec": meilleur_100m_sec,
                     "allure_moyenne_min_100m": allure_moyenne_min_100m,
+                    "allure_moyenne_100m_mmss": _format_pace_mm_ss(allure_moyenne_min_100m),
                 }
             )
         results.sort(key=lambda a: a["date"], reverse=True)
@@ -372,6 +426,7 @@ class GarminClient:
             "running": {
                 "heart_rate": _to_int(hr, default=None),
                 "pace_min_per_km": pace_min_per_km,
+                "pace_mmss": _format_pace_mm_ss(pace_min_per_km),
                 "power_watts": running_power,
                 "power_watts_per_kg": running_power_per_kg,
             },
@@ -385,6 +440,20 @@ class GarminClient:
         data = raw if isinstance(raw, dict) else {}
         weather_type = data.get("weatherTypeDTO") or {}
         station = data.get("weatherStationDTO") or {}
+        wind_raw = data.get("windSpeed")
+        gust_raw = data.get("windGust")
+
+        # Distance station <-> départ de la séance. Coordonnées de la station : celles du
+        # payload météo si présentes, sinon table OACI locale ; départ : résumé d'activité.
+        station_lat, station_lon = data.get("latitude"), data.get("longitude")
+        if not isinstance(station_lat, (int, float)) or not isinstance(station_lon, (int, float)):
+            station_lat, station_lon = _STATION_COORDS.get(str(station.get("id") or "").upper(), (None, None))
+        start_lat, start_lon = self._activity_start(activity_id)
+        distance_km = (
+            round(_haversine_km(station_lat, station_lon, start_lat, start_lon), 1)
+            if None not in (station_lat, station_lon, start_lat, start_lon)
+            else None
+        )
         return {
             # temp/apparentTemp/dewPoint : observés en °F sur un vrai compte (66 pour une
             # soirée d'août pluvieuse à Paris - incohérent en °C) — convertis en °C.
@@ -396,10 +465,34 @@ class GarminClient:
             # pour trancher mph/km/h comme pour la température) — laissés bruts, cf. README.
             "wind_speed_raw": _to_int(data.get("windSpeed"), default=None),
             "wind_gust_raw": _to_int(data.get("windGust"), default=None),
+            # Unité supposée mph, cohérente avec les températures en °F du même payload (non
+            # confirmée contre une source externe) -> convertie en km/h.
+            "wind_speed_kmh": _round_or_none(wind_raw * _MPH_TO_KMH if isinstance(wind_raw, (int, float)) else None),
+            # null = aucune rafale signalée par la station (pas une rafale nulle).
+            "wind_gust_kmh": _round_or_none(gust_raw * _MPH_TO_KMH if isinstance(gust_raw, (int, float)) else None),
+            "wind_unit_source": "mph_assumed",
             "wind_direction_compass": data.get("windDirectionCompassPoint"),
             "condition": weather_type.get("desc"),
             "station_name": station.get("name"),
+            "station_id": station.get("id"),
+            "station_distance_km": distance_km,
+            # Au-delà, la mesure peut s'écarter sensiblement des conditions sur le parcours.
+            "station_far": distance_km > _STATION_FAR_KM if distance_km is not None else None,
         }
+
+    def _activity_start(self, activity_id: str | int) -> tuple[float | None, float | None]:
+        """Coordonnées de départ d'une activité (résumé Garmin), (None, None) si absentes
+        ou si l'appel échoue — donnée complémentaire, jamais bloquante."""
+        try:
+            raw = self._call(self._garmin.get_activity, str(activity_id))
+        except Exception as exc:
+            logger.info("get_activity(%s) indisponible : %s", activity_id, exc)
+            return None, None
+        summary = (raw or {}).get("summaryDTO") or {} if isinstance(raw, dict) else {}
+        lat, lon = summary.get("startLatitude"), summary.get("startLongitude")
+        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+            return float(lat), float(lon)
+        return None, None
 
     def get_activity_details(self, activity_id: str | int) -> dict[str, Any]:
         raw = self._call(self._garmin.get_activity_details, str(activity_id))
@@ -710,6 +803,38 @@ def _format_pace_mm_ss(decimal_minutes: float | None) -> str | None:
     total_seconds = round(decimal_minutes * 60)
     minutes, seconds = divmod(total_seconds, 60)
     return f"{minutes}:{seconds:02d}"
+
+
+_MPH_TO_KMH = 1.609344
+_STATION_FAR_KM = 15.0
+# Coordonnées des stations météo (aéroports, code OACI) autour des lieux d'entraînement
+# habituels — repli quand le payload météo Garmin ne donne pas la position de la station.
+_STATION_COORDS: dict[str, tuple[float, float]] = {
+    "LFPV": (48.7742, 2.2017),  # Villacoublay-Vélizy
+    "LFPO": (48.7233, 2.3794),  # Paris-Orly
+    "LFPG": (49.0097, 2.5479),  # Paris-Charles-de-Gaulle
+    "LFPB": (48.9694, 2.4414),  # Paris-Le Bourget
+    "LFPN": (48.7519, 2.1061),  # Toussus-le-Noble
+    "LFPT": (49.0967, 2.0408),  # Pontoise-Cormeilles
+}
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def _garmin_timestamp_to_iso(value: Any) -> str | None:
+    """Timestamp Garmin GMT, en epoch ms ou en chaîne "2026-10-17T06:20:00.0" -> ISO Paris."""
+    if isinstance(value, (int, float)):
+        return _epoch_ms_to_iso(value)
+    parsed = _parse_garmin_gmt(value)
+    if parsed is None:
+        return None
+    return parsed.replace(tzinfo=timezone.utc).astimezone(PARIS_TZ).isoformat()
 
 
 def _epoch_ms_to_iso(value: Any) -> str | None:

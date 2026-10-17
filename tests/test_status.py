@@ -57,7 +57,9 @@ async def test_p3_body_battery_empty_is_no_data(tools: dict, client: GarminClien
 
     result = await tools["garmin_get_body_battery"]()
 
-    assert result == {"date": "2026-10-17", "status": "no_data", "value": None, "charged": None, "drained": None}
+    assert result["date"] == "2026-10-17"
+    assert result["status"] == "no_data"
+    assert all(result[k] is None for k in ("value", "charged", "drained", "at_wake", "min", "max", "latest"))
 
 
 async def test_p3_resting_hr_empty_is_no_data(tools: dict, client: GarminClient) -> None:
