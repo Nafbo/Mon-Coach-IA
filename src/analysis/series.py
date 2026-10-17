@@ -43,7 +43,7 @@ _STRONG_GAP_KMH = 10.0
 # Vélo : pauses absorbées par défaut pour le découplage (feux, carrefours, ravitaillement
 # court). La course garde son comportement historique (aucune fusion) sauf demande explicite.
 DEFAULT_PAUSE_MERGE_VELO_S = 120
-# Mode auto (pause_merge_s non fourni, vélo) : si la fenêtre couvre moins de 50 % du temps en
+# Mode auto (pause_merge_s non fourni, vélo) : si la fenêtre couvre moins des 2/3 du temps en
 # mouvement d'une sortie de plus de 60 min, élargissement par paliers jusqu'à 600 s.
 _VELO_AUTO_MERGE_STEPS_S = (300, 600)
 _VELO_WIDEN_MIN_MOVING_S = 3600
@@ -54,12 +54,13 @@ _VELO_WIDEN_MIN_MOVING_S = 3600
 #   non comparable (la FC n'est pas proportionnelle à la vitesse) ;
 # - profil asymétrique : D+ d'une moitié > 2 × celui de l'autre ET écart >= 50 m (le minimum
 #   absolu évite les faux positifs sur terrain plat, où 10 m contre 25 m ne change rien) ;
-# - couverture < 50 % : la fenêtre ignore l'essentiel de la sortie.
+# - couverture < 2/3 : la fenêtre ignore une part importante de la sortie. Seuil relevé de
+#   50 % à 2/3 le 17/10/2026 : une fenêtre de 51 % (13/09) jugeait la sortie sur sa moitié.
 _VELO_MAX_ABS_DECOUPLING_PCT = 10.0
 _VELO_MAX_SPEED_GAP_PCT = 15.0
 _VELO_DPLUS_RATIO = 2.0
 _VELO_MIN_DPLUS_GAP_M = 50
-_VELO_MIN_COVERAGE_PCT = 50.0
+_VELO_MIN_COVERAGE_PCT = 200 / 3  # 2/3, soit 66,7 %
 # Bornes Friel en fraction de la FC seuil.
 _ZONE_BOUNDS = [0.85, 0.90, 0.95, 1.00, 1.03]
 _ZONE_NAMES = ["Z1 recup", "Z2 endurance", "Z3 tempo", "Z4 seuil", "Z5a", "Z5b+"]
@@ -550,7 +551,7 @@ def _decoupling_velo(
     long effort continu (>= 40 min), sans correction de pente, avec indicateurs de fiabilité.
 
     `pause_merge_s` None = mode auto : fusion des pauses <= 120 s, puis élargissement par
-    paliers (300 s, 600 s) tant que la fenêtre couvre moins de 50 % du temps en mouvement
+    paliers (300 s, 600 s) tant que la fenêtre couvre moins des 2/3 du temps en mouvement
     d'une sortie de plus de 60 min. Valeur explicite = appliquée telle quelle."""
     total_moving = moving_time(t)
     auto = pause_merge_s is None

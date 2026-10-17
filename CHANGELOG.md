@@ -11,15 +11,17 @@ l'exception signalée au 17/10/2026 (matin) pour `garmin_get_training_status`.
   moyenne et temps en mouvement de chaque moitié), `pause_merge_mode`, `fusion_elargie`.
 - Non fiable (lecture « non interprétable », `decouplage_pct` conservé) si : |découplage| >
   10 % ; écart de vitesse moyenne > 15 % entre les moitiés ; D+ d'une moitié > 2 × l'autre
-  avec un écart ≥ 50 m ; fenêtre couvrant moins de 50 % du temps en mouvement.
+  avec un écart ≥ 50 m ; fenêtre couvrant moins des 2/3 (66,7 %) du temps en mouvement.
 - `pause_merge_s` non fourni : mode auto (120 s, puis 300 s et 600 s si la couverture est
-  < 50 % sur une sortie de plus de 60 min). Valeur explicite : appliquée telle quelle.
+  < 2/3 sur une sortie de plus de 60 min). Valeur explicite : appliquée telle quelle.
   `parametres.pause_merge_s` donne la valeur réellement appliquée.
 
 ### Sur les sorties réelles
 - 20/09 (24435612737) : non fiable (−19,6 %, vitesse 21,8 puis 29,6 km/h), couverture 68,5 %.
-- 13/09 (24343455443) : la fenêtre par défaut (0–2721 s) couvre 51,3 % du temps en mouvement,
-  au-dessus du seuil de 50 % : pas d'élargissement ; +1,5 %, fiable.
+- 13/09 (24343455443) : la fenêtre par défaut (0–2721 s) ne couvre que 51,3 % du temps en
+  mouvement ; le mode auto élargit à 600 s (pauses de 408 s et 175 s absorbées), couverture
+  100 %, −4,5 %, fiable. Seuil de couverture choisi à 2/3 plutôt que 50 % pour qu'une sortie
+  ne soit pas jugée sur sa seule moitié.
 
 ## 2026-10-17 (soir) — Vélo route sans capteur de puissance
 

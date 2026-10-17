@@ -340,13 +340,15 @@ async def test_acceptance_bike_0913() -> None:
     tools = _real_tools(BIKE_0913)
 
     default = await tools["garmin_analyse_activity"](BIKE_0913, fc_seuil=160)
-    merged = await tools["garmin_analyse_activity"](BIKE_0913, fc_seuil=160, pause_merge_s=600)
+    explicit = await tools["garmin_analyse_activity"](BIKE_0913, fc_seuil=160, pause_merge_s=120)
 
     assert default["vue_ensemble"]["vitesse_moy_kmh"] == pytest.approx(27.7, abs=0.1)
-    # Pauses de 408 s et 175 s : aucune n'est fusionnée avec le défaut de 120 s, la fenêtre
-    # reste 0-2721 s ; il faut pause_merge_s >= 408 pour couvrir toute la sortie.
-    assert (default["derive_cardiaque"]["debut_s"], default["derive_cardiaque"]["fin_s"]) == (0, 2721)
-    assert merged["derive_cardiaque"]["duree_mouvement_s"] > 2721
+    # Pauses de 408 s et 175 s. Mode auto (défaut) : la fenêtre à 120 s ne couvre que 51 % de
+    # la sortie, la fusion est élargie jusqu'à couvrir toute la sortie. Avec 120 s explicite,
+    # la fenêtre reste 0-2721 s, signalée non fiable (couverture < 2/3).
+    assert default["derive_cardiaque"]["duree_mouvement_s"] > 2721
+    assert (explicit["derive_cardiaque"]["debut_s"], explicit["derive_cardiaque"]["fin_s"]) == (0, 2721)
+    assert explicit["derive_cardiaque"]["fiable"] is False
 
 
 # -- non-régression course / nage (snapshots figés avant la modification) ---------------------------
@@ -533,8 +535,13 @@ async def test_acceptance_reliability_0913() -> None:
 
     derive = (await tools["garmin_analyse_activity"](BIKE_0913, fc_seuil=160))["derive_cardiaque"]
 
-    # La fenêtre par défaut (0-2721 s) couvre déjà 51,3 % du temps en mouvement (2721 / 5299 s),
-    # au-dessus du seuil de 50 % : le mode auto n'élargit donc pas.
-    assert derive["couverture_pct"] == pytest.approx(51.3, abs=0.1)
-    assert derive["fusion_elargie"] is False
+    # Fenêtre par défaut 0-2721 s = 51,3 % du temps en mouvement (< 2/3) : le mode auto élargit.
+    # 300 s absorbe la pause de 175 s sans dépasser le 1er morceau ; 600 s absorbe aussi celle
+    # de 408 s et couvre toute la sortie.
+    assert derive["fusion_elargie"] is True
+    assert derive["pause_merge_s"] == 600
+    assert [p["duree_s"] for p in derive["pauses_fusionnees"]] == [408, 175]
+    assert (derive["debut_s"], derive["fin_s"]) == (0, 5882)
+    assert derive["couverture_pct"] == 100.0
+    assert derive["decouplage_pct"] == pytest.approx(-4.5, abs=0.1)
     assert derive["fiable"] is True

@@ -588,7 +588,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         - `pause_merge_s` (optionnel) : pour le découplage cardiaque, fusionne les segments
           séparés par une pause ≤ ce seuil (en s). Valeur explicite : appliquée telle quelle.
           Vélo sans valeur = mode « auto » : pauses ≤ 120 s fusionnées (feux, carrefours),
-          puis, si la fenêtre obtenue couvre moins de 50 % du temps en mouvement d'une sortie
+          puis, si la fenêtre obtenue couvre moins des 2/3 du temps en mouvement d'une sortie
           de plus de 60 min, élargissement par paliers (300 s puis 600 s, plafond). Course
           sans valeur : aucune fusion (comportement historique inchangé).
 
@@ -617,7 +617,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
           fiable ; "non interprétable" sinon). Non fiable si : |découplage| > 10 % ; vitesse
           moyenne différente de plus de 15 % entre les moitiés ; profil asymétrique (D+ d'une
           moitié > 2 × l'autre ET écart ≥ 50 m, le minimum évitant les faux positifs sur
-          terrain plat) ; fenêtre couvrant moins de 50 % du temps en mouvement.
+          terrain plat) ; fenêtre couvrant moins des 2/3 (66,7 %) du temps en mouvement.
 
         Course : sortie historique inchangée, plus `distance_officielle_km` dans
         `vue_ensemble` quand le résumé Garmin est disponible.
