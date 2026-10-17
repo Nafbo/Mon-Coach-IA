@@ -325,6 +325,20 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         )
         return result if result.get("error") else {"week_start_date": week_start.isoformat(), **result}
 
+    async def garmin_get_activity_feedback(activity_id: str) -> dict[str, Any]:
+        """Auto-évaluation de l'athlète saisie sur la montre en fin d'activité :
+        `sensations` ("Très faible" | "Faible" | "Normal" | "Fort" | "Très fort", valeur brute
+        Garmin 0/25/50/75/100 dans `sensations_brut`) et `effort_percu_sur_10` (RPE 1 à 10,
+        10 = effort maximal) avec son libellé Garmin `effort_percu_libelle` ("Très léger",
+        "Léger", "Modéré", "Difficile", "Très difficile", "Maximal").
+
+        `status` : "ok" | "no_data" (rien saisi pour cette activité : valeurs null ; jamais mis
+        en cache, pour voir une saisie faite plus tard dans l'app) | erreur. Cache 1h.
+        """
+        return _fetch_cached(
+            "activity_feedback", str(activity_id), lambda: client.get_activity_feedback(activity_id)
+        )
+
     async def garmin_get_activity_weather(activity_id: str) -> dict[str, Any]:
         """Météo d'une activité : températures en °C, `humidity_percent`, vent
         `wind_speed_kmh` / `wind_gust_kmh` (km/h, unité native Garmin ; rafale null = aucune
@@ -674,6 +688,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         "garmin_get_lactate_threshold": garmin_get_lactate_threshold,
         "garmin_get_intensity_minutes": garmin_get_intensity_minutes,
         "garmin_get_activity_weather": garmin_get_activity_weather,
+        "garmin_get_activity_feedback": garmin_get_activity_feedback,
         "garmin_get_activity_details": garmin_get_activity_details,
         "garmin_analyse_activity": garmin_analyse_activity,
         "garmin_get_swim_splits": garmin_get_swim_splits,

@@ -446,6 +446,26 @@ class GarminClient:
             },
         }
 
+    def get_activity_feedback(self, activity_id: str | int) -> dict[str, Any]:
+        """Auto-évaluation saisie sur la montre (ou dans l'app) en fin d'activité : sensations
+        et effort perçu. Vérifié sur un vrai compte (17/10/2026) : `summaryDTO` de
+        `get_activity` porte `directWorkoutFeel` (0/25/50/75/100) et `directWorkoutRpe`
+        (10 à 100, soit l'effort perçu × 10) ; absents de la liste `get_activities`.
+        `status` "no_data" si rien n'a été saisi pour cette activité."""
+        raw = self._call(self._garmin.get_activity, str(activity_id))
+        summary = ((raw or {}).get("summaryDTO") or {}) if isinstance(raw, dict) else {}
+        feel = summary.get("directWorkoutFeel")
+        rpe = summary.get("directWorkoutRpe")
+        feel = feel if isinstance(feel, (int, float)) else None
+        effort = round(rpe / 10) if isinstance(rpe, (int, float)) and rpe > 0 else None
+        return {
+            "status": "ok" if feel is not None or effort is not None else "no_data",
+            "sensations": _feel_label(feel),
+            "sensations_brut": _to_int(feel, default=None),
+            "effort_percu_sur_10": effort,
+            "effort_percu_libelle": _rpe_label(effort),
+        }
+
     def get_activity_weather(self, activity_id: str | int) -> dict[str, Any]:
         raw = self._call(self._garmin.get_activity_weather, str(activity_id))
         data = raw if isinstance(raw, dict) else {}
@@ -880,6 +900,33 @@ _STATION_COORDS: dict[str, tuple[float, float]] = {
     "LFPN": (48.7519, 2.1061),  # Toussus-le-Noble
     "LFPT": (49.0967, 2.0408),  # Pontoise-Cormeilles
 }
+
+
+# Échelle "Sensations" de la montre (directWorkoutFeel) : 5 crans de 25.
+_FEEL_LABELS = {0: "Très faible", 25: "Faible", 50: "Normal", 75: "Fort", 100: "Très fort"}
+
+
+def _feel_label(value: float | None) -> str | None:
+    if value is None:
+        return None
+    return _FEEL_LABELS[min(_FEEL_LABELS, key=lambda k: abs(k - value))]
+
+
+def _rpe_label(effort: int | None) -> str | None:
+    """Libellés de l'échelle d'effort perçu (RPE 1-10) affichée par Garmin."""
+    if effort is None:
+        return None
+    if effort <= 1:
+        return "Très léger"
+    if effort <= 3:
+        return "Léger"
+    if effort <= 6:
+        return "Modéré"
+    if effort <= 8:
+        return "Difficile"
+    if effort == 9:
+        return "Très difficile"
+    return "Maximal"
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

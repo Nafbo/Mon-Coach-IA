@@ -246,7 +246,7 @@ permanent change, sa clé est versionnée (ex. `activity_weather_v2`).
 
 ## Tools MCP exposés
 
-27 tools au total. La description détaillée de chaque tool (entrées, sorties, unités, états
+28 tools au total. La description détaillée de chaque tool (entrées, sorties, unités, états
 d'erreur) est sa docstring dans `src/tools/garmin_tools.py` / `src/tools/operational_tools.py` :
 c'est elle que le client MCP reçoit comme description du tool.
 
@@ -286,6 +286,7 @@ c'est elle que le client MCP reçoit comme description du tool.
 | Tool | Rôle |
 |---|---|
 | `garmin_analyse_activity` | **Analyse chiffrée côté serveur** (logique de `analyse_series.py`) : vue d'ensemble (temps en mouvement vs écoulé, pauses, distance), zones FC Friel, blocs d'effort (allure brute et corrigée de la pente, écart à la cible), récupérations (baisse de FC signée), découplage cardiaque sur effort continu ≥ 40 min. Paramètres `fc_seuil`, `allure_cible`, `type` (`auto`/`fractionne`/`seuil`/`endurance`). JSON de quelques centaines de tokens |
+| `garmin_get_activity_feedback` | Auto-évaluation saisie sur la montre en fin d'activité : `sensations` (Très faible → Très fort) et `effort_percu_sur_10` (RPE) avec son libellé ; `no_data` si rien n'a été saisi (cache 1h, `no_data` jamais mis en cache) |
 | `garmin_get_activity_weather` | Météo d'une activité : °C, vent en km/h, distance station ↔ départ (`station_far` au-delà de 15 km) |
 | `garmin_get_activity_details` | Séries FC / allure / dénivelé / distance alignées sur le temps, `elapsed_s`, `moving_s`, `pauses`. `resolution_s` optionnel (ex. 5 = 1 point / 5 s, médiane) |
 | `garmin_get_swim_splits` | Longueurs de piscine (allure/FC/SWOLF) + `blocks` délimités par les repos ; longueurs aberrantes marquées `suspect: true` (conservées) |
