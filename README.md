@@ -252,30 +252,43 @@ c'est elle que le client MCP reçoit comme description du tool.
 
 ### Conventions communes (tools `garmin_*`)
 
-- **`status`** sur chaque réponse : `"ok"` (donnée présente), `"no_data"` (Garmin n'a rien pour
-  cette date / activité : nuit non synchronisée, journée sans mesure…), `"error"` (appel en
-  échec). En erreur, `error: true` et `message` (message exact de Garmin, préfixé
-  "Identifiants Garmin invalides : " / "Garmin Connect injoignable : ") sont aussi présents.
+- **`status`** sur chaque réponse : `"ok"` (donnée présente), `"no_data"` (appel réussi, Garmin
+  n'a rien pour cette date / activité : nuit non synchronisée, aucune activité sur la
+  période…), `"error"` (appel en échec). Une erreur ne ressemble jamais à une liste vide.
+- **En erreur** : `error: true` (historique), `message` (message exact de Garmin, préfixé
+  "Identifiants Garmin invalides : " / "Garmin Connect injoignable : "), `error_type` et
+  `error_detail: {type, message}`. `error_type` : `auth` (jeton expiré, compte verrouillé,
+  HTTP 401/403), `network` (coupure, timeout, erreur HTTP), `rate_limit` (HTTP 429, Garmin
+  limite les appels), `unknown` ; `invalid_input` pour un paramètre refusé avant tout appel.
+  `garmin_health_check` expose directement `error: {type, message}` ou `null`.
   Les tools d'écriture gardent leurs statuts métier (`dry_run`, `already_scheduled`).
-- **Absence de donnée = `null`, jamais `0`** : un `0` est une vraie mesure.
+- **Absence de donnée = `null`, jamais `0`.** Sommeil, Body Battery et FC de repos portent en
+  plus `availability` : `ok`, `zero` (Garmin a renvoyé 0 : montre non portée, valeur non
+  exploitable), `empty` (aucune donnée) — `error` dans `data_availability` en cas d'échec.
+- **`last_sync`** (`garmin_health_check`, `garmin_sync`, `garmin_get_recent_activities`,
+  `garmin_get_daily_snapshot`) : heure de la dernière synchro de la **montre** vers Garmin
+  Connect (`at`, `age_minutes`, `source`, `device`), pas l'heure de l'appel. Une liste
+  d'activités vide avec un `last_sync.at` antérieur à la séance = « pas encore synchronisé ».
 - **Unités** : durées en secondes (`*_s`) ou minutes (`*_minutes`), distances en km (`*_km`) ou m
-  (`*_m`), FC en bpm, températures en °C, vent en km/h, allures en **minutes décimales**
-  (`4.43` = 4 min 26 s/km) doublées d'un champ `*_mmss` ("4:26"), horodatages ISO 8601 en
-  Europe/Paris.
+  (`*_m`), FC en bpm, températures en °C, vent en km/h (`wind_speed_unit`), allures en
+  **minutes décimales** (`4.43` = 4 min 26 s/km) doublées d'une chaîne "M:SS" (`*_mmss`,
+  alias `pace_min_per_km` + `pace_mmss`), horodatages ISO 8601 en Europe/Paris. Les séries
+  point par point de `garmin_get_activity_details` restent en minutes décimales seules (un
+  champ texte par point doublerait la taille de la réponse).
 
 ### Garmin — données quotidiennes (cache 1h)
 
 | Tool | Rôle |
 |---|---|
-| `garmin_get_daily_snapshot` | **Point d'entrée de l'analyse quotidienne** : sommeil, Body Battery, FC repos, statut/charge d'entraînement (aiguë, chronique, ratio), charge par filière, seuil lactique, VO2max en un appel, chaque bloc avec son `status` |
-| `garmin_health_check` | Connexion Garmin, dernière synchro montre, dernière activité reçue, fraîcheur sommeil / Body Battery / FC repos — à appeler en début de routine planifiée (jamais mis en cache) |
-| `garmin_sync` | Rafraîchit toutes les données du jour en une fois, écrit dans `garmin_cache` |
+| `garmin_get_daily_snapshot` | **Point d'entrée de l'analyse quotidienne** : sommeil, Body Battery, FC repos, statut/charge d'entraînement (aiguë, chronique, ratio), charge par filière, seuil lactique, VO2max en un appel, chaque bloc avec son `status` et son `availability` (ok/zero/empty/error), `last_sync` |
+| `garmin_health_check` | **À appeler avant toute analyse** (aucun argument, ne lève jamais, jamais mis en cache) : vrais appels authentifiés, `status` + `error {type, message}`, `last_sync` (dernière synchro montre), `latest_activity`, `data_availability` (activities ok/empty/error ; sommeil, Body Battery, FC repos ok/zero/empty/error) |
+| `garmin_sync` | Rafraîchit toutes les données du jour en une fois, écrit dans `garmin_cache` ; renvoie `last_sync` |
 | `garmin_get_training_status` | Libellé Garmin (`training_status`) + charge aiguë/chronique |
 | `garmin_get_body_battery` | Niveau au réveil (`at_wake`), `min`/`max` du jour, dernier niveau (`latest`, `latest_at`), cumuls `charged`/`drained` ; `value` = `latest` (compat.) |
 | `garmin_get_vo2max` | VO2max course/vélo, date réelle de la valeur |
 | `garmin_get_resting_hr` | FC repos, `measured_on`, `last_sync_at`, `provisoire` (jour en cours, valeur encore recalculée) |
 | `garmin_get_sleep` | Détail du sommeil (durée, phases, score) |
-| `garmin_get_recent_activities` | Activités récentes normalisées (`course`/`velo`/`nage`/`renfo`) |
+| `garmin_get_recent_activities` | Activités récentes normalisées (`course`/`velo`/`nage`/`renfo`), `last_sync` ; `force_refresh=true` relit Garmin sans cache |
 | `garmin_get_training_load` | Charge aiguë/chronique détaillée, ratio, statut, cibles ACWR |
 | `garmin_get_training_load_balance` | Répartition mensuelle de charge (aérobie faible/élevée/anaérobique) |
 | `garmin_get_lactate_threshold` | Seuil lactique course (FC + allure) et FTP vélo |
@@ -285,11 +298,11 @@ c'est elle que le client MCP reçoit comme description du tool.
 
 | Tool | Rôle |
 |---|---|
-| `garmin_analyse_activity` | **Analyse chiffrée côté serveur** (logique de `analyse_series.py`) : vue d'ensemble (temps en mouvement vs écoulé, pauses, distance), zones FC Friel, blocs d'effort (allure brute et corrigée de la pente, écart à la cible), récupérations (baisse de FC signée), découplage cardiaque sur effort continu ≥ 40 min. Paramètres `fc_seuil`, `allure_cible`, `type` (`auto`/`fractionne`/`seuil`/`endurance`). JSON de quelques centaines de tokens |
+| `garmin_analyse_activity` | **Analyse chiffrée côté serveur** (logique de `analyse_series.py`) : vue d'ensemble (temps en mouvement vs écoulé, pauses, distance), zones FC Friel, blocs d'effort (allure brute et corrigée de la pente, écart à la cible), récupérations (variation de FC signée, « −12 bpm »), `elapsed_s` / `moving_s` / `pauses`, découplage cardiaque sur effort continu ≥ 40 min. Paramètres `fc_seuil`, `allure_cible`, `type` (`auto`/`fractionne`/`seuil`/`endurance`). JSON de quelques centaines de tokens |
 | `garmin_get_activity_feedback` | Auto-évaluation saisie sur la montre en fin d'activité : `sensations` (Très faible → Très fort) et `effort_percu_sur_10` (RPE) avec son libellé ; `no_data` si rien n'a été saisi (cache 1h, `no_data` jamais mis en cache) |
 | `garmin_get_activity_weather` | Météo d'une activité : °C, vent en km/h, distance station ↔ départ (`station_far` au-delà de 15 km) |
 | `garmin_get_activity_details` | Séries FC / allure / dénivelé / distance alignées sur le temps, `elapsed_s`, `moving_s`, `pauses`. `resolution_s` optionnel (ex. 5 = 1 point / 5 s, médiane) |
-| `garmin_get_swim_splits` | Longueurs de piscine (allure/FC/SWOLF) + `blocks` délimités par les repos ; longueurs aberrantes marquées `suspect: true` (conservées) |
+| `garmin_get_swim_splits` | Longueurs de piscine (allure/FC/SWOLF) + `blocks` délimités par les repos (rôle échauffement / série / retour au calme, repos avant/après) + `totaux` (nage hors repos, repos) ; longueurs aberrantes marquées `suspect: true` (conservées) |
 
 ### Garmin — séances structurées (écriture)
 
@@ -579,6 +592,20 @@ Appeler `list_tools()` pour confirmer que les tools attendus sont exposés (comp
 présence des nouveaux/absence des supprimés), puis un appel `dry_run=True` (pour
 `garmin_push_workout`) ou en lecture pure (`garmin_get_*`) avant tout test impliquant une
 écriture réelle sur le compte Garmin.
+
+### Recharger le catalogue d'outils côté client
+
+Le serveur expose ses outils à l'ouverture de chaque session MCP : après un redéploiement, un
+client resté connecté peut continuer à utiliser l'ancien catalogue (outil absent, ancienne
+description). Pour le recharger :
+
+- **Claude (claude.ai, app de bureau, Cowork)** : ouvrir une nouvelle conversation ; si
+  l'outil manque encore, déconnecter puis reconnecter le connecteur dans
+  *Paramètres → Connecteurs*. Les tâches planifiées démarrent une nouvelle session à chaque
+  exécution : elles voient le nouveau catalogue dès le run suivant.
+- **Claude Code** : relancer la session, ou `/mcp` puis *Reconnect* sur le serveur.
+- **Vérifier** : demander la liste des outils et contrôler la présence de
+  `garmin_health_check` (et des autres outils ajoutés, cf. `CHANGELOG.md`).
 
 ### Piège connu : dérive de version entre environnements
 
