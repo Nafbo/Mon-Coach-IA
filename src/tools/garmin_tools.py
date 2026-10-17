@@ -327,8 +327,8 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
 
     async def garmin_get_activity_weather(activity_id: str) -> dict[str, Any]:
         """Météo d'une activité : températures en °C, `humidity_percent`, vent
-        `wind_speed_kmh` / `wind_gust_kmh` (km/h, convertis depuis des mph supposés, cf.
-        `wind_unit_source` ; rafale null = aucune rafale signalée), `wind_direction_compass`,
+        `wind_speed_kmh` / `wind_gust_kmh` (km/h, unité native Garmin ; rafale null = aucune
+        rafale signalée), `wind_direction_compass`,
         `condition`, station (`station_name`, `station_id`, `station_distance_km` entre la
         station et le départ, `station_far` true au-delà de 15 km : mesure peu
         représentative). Les champs `*_raw` historiques sont conservés. Cache sans

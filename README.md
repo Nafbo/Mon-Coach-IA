@@ -350,8 +350,9 @@ Plusieurs tools s'écartent du schéma initialement envisagé, validés en condi
   `garminconnect` en **°F**, pas en °C — repéré car `66` pour une soirée d'août pluvieuse à
   Paris serait absurde en Celsius mais cohérent en Fahrenheit (`18.9°C`). Convertis en Celsius
   (`temp_celsius`, `apparent_temp_celsius`, `dew_point_celsius`). `windSpeed`/`windGust`
-  laissés bruts (`wind_speed_raw`, `wind_gust_raw`) — pas de valeur assez caractéristique pour
-  trancher leur unité (mph vs km/h).
+  sont en revanche déjà en **km/h** (confirmé contre l'app Garmin Connect) : exposés tels quels
+  dans `wind_speed_kmh`/`wind_gust_kmh` (`wind_speed_raw`/`wind_gust_raw` conservés pour
+  compatibilité).
 - **`garmin_get_activity_details`** : confirme le couple `metricDescriptors`/
   `activityDetailMetrics`, avec un piège non anticipé — **l'ordre de la liste
   `metricDescriptors` ne correspond pas à l'ordre réel des valeurs dans le tableau `metrics` de

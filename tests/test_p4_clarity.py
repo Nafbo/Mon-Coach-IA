@@ -147,9 +147,8 @@ def test_p4_weather_wind_in_kmh_and_gust_null(client: GarminClient) -> None:
     result = client.get_activity_weather("24725112038")
 
     assert result["wind_speed_raw"] == 2  # champ historique conservé
-    assert result["wind_speed_kmh"] == 3.2
+    assert result["wind_speed_kmh"] == 2  # unité native Garmin : km/h, pas de conversion
     assert result["wind_gust_kmh"] is None
-    assert result["wind_unit_source"] == "mph_assumed"
 
 
 def test_p4_weather_station_distance_close(client: GarminClient) -> None:

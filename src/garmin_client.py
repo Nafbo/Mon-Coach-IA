@@ -472,16 +472,13 @@ class GarminClient:
             "apparent_temp_celsius": _fahrenheit_to_celsius(data.get("apparentTemp")),
             "dew_point_celsius": _fahrenheit_to_celsius(data.get("dewPoint")),
             "humidity_percent": _to_int(data.get("relativeHumidity"), default=None),
-            # windSpeed/windGust : unité non confirmée (pas de valeur assez caractéristique
-            # pour trancher mph/km/h comme pour la température) — laissés bruts, cf. README.
+            # windSpeed/windGust : déjà en km/h (confirmé contre l'app Garmin Connect),
+            # contrairement aux températures en °F. Champs *_raw conservés pour compat.
             "wind_speed_raw": _to_int(data.get("windSpeed"), default=None),
             "wind_gust_raw": _to_int(data.get("windGust"), default=None),
-            # Unité supposée mph, cohérente avec les températures en °F du même payload (non
-            # confirmée contre une source externe) -> convertie en km/h.
-            "wind_speed_kmh": _round_or_none(wind_raw * _MPH_TO_KMH if isinstance(wind_raw, (int, float)) else None),
+            "wind_speed_kmh": _round_or_none(wind_raw),
             # null = aucune rafale signalée par la station (pas une rafale nulle).
-            "wind_gust_kmh": _round_or_none(gust_raw * _MPH_TO_KMH if isinstance(gust_raw, (int, float)) else None),
-            "wind_unit_source": "mph_assumed",
+            "wind_gust_kmh": _round_or_none(gust_raw),
             "wind_direction_compass": data.get("windDirectionCompassPoint"),
             "condition": weather_type.get("desc"),
             "station_name": station.get("name"),
@@ -864,7 +861,6 @@ def _format_pace_mm_ss(decimal_minutes: float | None) -> str | None:
     return f"{minutes}:{seconds:02d}"
 
 
-_MPH_TO_KMH = 1.609344
 _STATION_FAR_KM = 15.0
 # Coordonnées des stations météo (aéroports, code OACI) autour des lieux d'entraînement
 # habituels — repli quand le payload météo Garmin ne donne pas la position de la station.
