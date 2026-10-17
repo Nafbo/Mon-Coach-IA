@@ -1,4 +1,4 @@
-"""Point d'entrée : création de l'app MCP, montage des 17 tools, exposition ASGI."""
+"""Point d'entrée : création de l'app MCP, montage des tools, exposition ASGI."""
 
 from __future__ import annotations
 

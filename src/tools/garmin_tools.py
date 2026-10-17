@@ -8,6 +8,7 @@ import sqlite3
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
+from src.analysis.series import ANALYSIS_TYPES, analyse, downsample
 from src.garmin_client import GarminAuthenticationError, GarminClient, GarminUnavailableError
 from src.models import monday_of_week, now_paris, today_paris
 from src.workout_builder import build_workout
@@ -304,16 +305,64 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
             _store_cache(conn, "activity_weather", key, cached)
         return cached
 
-    async def garmin_get_activity_details(activity_id: str) -> dict[str, Any]:
+    def _activity_details(activity_id: str) -> dict[str, Any]:
+        """Séries de l'activité (cache sans expiration : une activité passée ne change plus).
+        Lève l'exception Garmin telle quelle, à mapper par l'appelant."""
         key = str(activity_id)
         cached = _get_cached(conn, "activity_details", key, ignore_freshness=True)
         if cached is None:
-            try:
-                cached = client.get_activity_details(activity_id)
-            except Exception as exc:
-                return {"error": True, "message": _garmin_error_message(exc)}
+            cached = client.get_activity_details(activity_id)
             _store_cache(conn, "activity_details", key, cached)
         return cached
+
+    async def garmin_get_activity_details(activity_id: str, resolution_s: int | None = None) -> dict[str, Any]:
+        """Séries temporelles d'une activité : `time_s` (temps écoulé, s), `heart_rate_bpm`,
+        `pace_min_per_km` (minutes décimales), `elevation_m`.
+
+        `resolution_s` (optionnel) : sous-échantillonne à 1 point par tranche de N secondes
+        (médiane), ex. 5 -> ~5x moins de tokens. Sans ce paramètre : séries complètes
+        (~30 000 tokens pour 1 h). Pour une analyse chiffrée, préférer
+        `garmin_analyse_activity`, qui calcule côté serveur sans renvoyer les séries.
+        """
+        if resolution_s is not None and resolution_s < 1:
+            return {"error": True, "message": f"resolution_s doit être >= 1 (reçu : {resolution_s})"}
+        try:
+            details = _activity_details(activity_id)
+        except Exception as exc:
+            return {"error": True, "message": _garmin_error_message(exc)}
+        if resolution_s is not None and resolution_s > 1:
+            return downsample(details, resolution_s)
+        return details
+
+    async def garmin_analyse_activity(
+        activity_id: str, fc_seuil: float, allure_cible: float | None = None, type: str = "auto"
+    ) -> dict[str, Any]:
+        """Analyse chiffrée d'une activité calculée côté serveur (logique du script
+        `analyse_series.py` de la Skill analyst), sans renvoyer les séries brutes.
+
+        Entrée : `fc_seuil` (FC au seuil lactique, bpm), `allure_cible` (optionnelle, allure
+        prévue des blocs en min/km décimales, ex. 4.0 = 4:00/km), `type` parmi
+        "auto" | "fractionne" | "seuil" | "endurance".
+
+        Sortie (JSON compact) : `vue_ensemble` (durée, distance, allure, FC, bascule
+        effort/récup), `zones_fc` (% du temps par zone Friel), `blocs` (début, durée,
+        distance, allure brute et corrigée de la pente, FC, D+, écart à la cible),
+        `recuperations` entre blocs (FC fin de bloc, FC à +60 s, baisse en bpm),
+        `derive_cardiaque` (découplage FC/allure sur l'effort continu le plus long s'il
+        dépasse 40 min, sinon null). Allures doublées d'un champ `*_mmss` ("M:SS").
+
+        `status` : "ok", "no_data" (série sans allure, ex. natation en piscine -> utiliser
+        garmin_get_swim_splits) ou erreur (`error: true`, `message`).
+        """
+        if type not in ANALYSIS_TYPES:
+            return {"error": True, "message": f"type invalide : {type} (attendu : {', '.join(ANALYSIS_TYPES)})"}
+        if not fc_seuil or fc_seuil <= 0:
+            return {"error": True, "message": f"fc_seuil invalide : {fc_seuil}"}
+        try:
+            details = _activity_details(activity_id)
+        except Exception as exc:
+            return {"error": True, "message": _garmin_error_message(exc)}
+        return {"activity_id": str(activity_id), **analyse(details, fc_seuil, allure_cible, type)}
 
     async def garmin_get_swim_splits(activity_id: str) -> dict[str, Any]:
         key = str(activity_id)
@@ -509,6 +558,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         "garmin_get_intensity_minutes": garmin_get_intensity_minutes,
         "garmin_get_activity_weather": garmin_get_activity_weather,
         "garmin_get_activity_details": garmin_get_activity_details,
+        "garmin_analyse_activity": garmin_analyse_activity,
         "garmin_get_swim_splits": garmin_get_swim_splits,
         "garmin_push_workout": garmin_push_workout,
         "garmin_list_workouts": garmin_list_workouts,
