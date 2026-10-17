@@ -151,6 +151,10 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
     """Construit les tools garmin_* liés à un `GarminClient` et une connexion DB donnés."""
 
     async def garmin_sync() -> dict[str, Any]:
+        """Force le rafraîchissement de toutes les données du jour (statut et charge
+        d'entraînement, Body Battery, VO2max, FC repos, sommeil, activités des 7 derniers
+        jours, seuil lactique, minutes d'intensité) et les écrit en cache — sauf les blocs
+        `no_data`. Sortie : `status` "ok" + `synced_at` (ISO Europe/Paris), ou erreur."""
         try:
             today = today_paris()
             week_start = monday_of_week(today)
@@ -648,6 +652,9 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         return {"status": "ok", "workouts": sorted(workouts.values(), key=lambda w: w["date"] or "")}
 
     async def garmin_delete_workout(workout_id: int) -> dict[str, Any]:
+        """Supprime une séance structurée (le template Garmin, ce qui retire aussi son
+        occurrence programmée). `workout_id` : champ `workout_id` de `garmin_list_workouts`
+        ou de `garmin_push_workout`. Sortie : `status` "ok" + `workout_id`, ou erreur."""
         try:
             client.delete_workout(workout_id)
         except Exception as exc:

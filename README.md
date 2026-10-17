@@ -135,6 +135,26 @@ est ainsi vérifiée sans dépendre d'un compte réel — mais ne garantit pas q
 `garminconnect` réellement installée expose l'API supposée : cf. [Mise à jour en
 production](#mise-à-jour-en-production), incident `TargetType`.
 
+L'analyse (`src/analysis/`) est testée hors ligne de deux façons :
+
+- **séries synthétiques** (`tests/synthetic.py`) calquées sur les activités de référence —
+  course 24725112038 (3306 s, pauses 2558→2692 s et 2832→2921 s) et nage 24748453127
+  (72 × 25 m, longueurs 21 et 59 aberrantes) ; toujours exécutées ;
+- **séries réelles anonymisées** (`tests/fixtures/<activity_id>.json.gz`, GPS et identité
+  retirés), utilisées par `tests/test_reference_fixtures.py` et ignorées tant qu'elles
+  n'existent pas. Pour les (re)générer, avec un token Garmin valide (lecture seule) :
+
+```bash
+python scripts/capture_fixtures.py 24725112038 24748453127
+```
+
+Vérification en direct sur le vrai compte (lecture seule) des corrections sur les deux
+activités de référence :
+
+```bash
+python scripts/verify_reference.py 177
+```
+
 ## Fuseau horaire
 
 Toutes les dates/heures générées côté serveur — dates métier (`today`, `week_start_date`, dates
@@ -205,24 +225,43 @@ CREATE TABLE IF NOT EXISTS garmin_cache (
 
 `garmin_cache` évite de sur-solliciter l'API Garmin : les tools `garmin_get_*` vérifient d'abord
 qu'une donnée fraîche (< 1h, `CACHE_FRESHNESS`) existe en cache avant d'appeler `garminconnect` —
-sauf `garmin_sync` qui force toujours un appel réel, et `garmin_get_activity_weather`/
-`garmin_get_activity_details` dont le cache n'expire jamais (la météo/les détails d'une activité
-terminée sont immuables).
+sauf `garmin_sync` qui force toujours un appel réel, `force_refresh=True` qui contourne le cache,
+et les tools d'activité (`garmin_get_activity_weather`, `garmin_get_activity_details`,
+`garmin_get_swim_splits`, `garmin_analyse_activity`) dont le cache n'expire jamais (une activité
+terminée est immuable). Une réponse `no_data` n'est **jamais** mise en cache : une donnée
+synchronisée en retard apparaît dès l'appel suivant. Quand le format d'un payload en cache
+permanent change, sa clé est versionnée (ex. `activity_weather_v2`).
 
 ## Tools MCP exposés
 
-23 tools au total. Schémas d'input/output exacts dans le code (`src/tools/garmin_tools.py`,
-`src/tools/operational_tools.py`) — la liste ci-dessous donne le rôle de chacun.
+27 tools au total. La description détaillée de chaque tool (entrées, sorties, unités, états
+d'erreur) est sa docstring dans `src/tools/garmin_tools.py` / `src/tools/operational_tools.py` :
+c'est elle que le client MCP reçoit comme description du tool.
 
-### Garmin — données individuelles (cache 1h)
+### Conventions communes (tools `garmin_*`)
+
+- **`status`** sur chaque réponse : `"ok"` (donnée présente), `"no_data"` (Garmin n'a rien pour
+  cette date / activité : nuit non synchronisée, journée sans mesure…), `"error"` (appel en
+  échec). En erreur, `error: true` et `message` (message exact de Garmin, préfixé
+  "Identifiants Garmin invalides : " / "Garmin Connect injoignable : ") sont aussi présents.
+  Les tools d'écriture gardent leurs statuts métier (`dry_run`, `already_scheduled`).
+- **Absence de donnée = `null`, jamais `0`** : un `0` est une vraie mesure.
+- **Unités** : durées en secondes (`*_s`) ou minutes (`*_minutes`), distances en km (`*_km`) ou m
+  (`*_m`), FC en bpm, températures en °C, vent en km/h, allures en **minutes décimales**
+  (`4.43` = 4 min 26 s/km) doublées d'un champ `*_mmss` ("4:26"), horodatages ISO 8601 en
+  Europe/Paris.
+
+### Garmin — données quotidiennes (cache 1h)
 
 | Tool | Rôle |
 |---|---|
+| `garmin_get_daily_snapshot` | **Point d'entrée de l'analyse quotidienne** : sommeil, Body Battery, FC repos, statut/charge d'entraînement (aiguë, chronique, ratio), charge par filière, seuil lactique, VO2max en un appel, chaque bloc avec son `status` |
+| `garmin_health_check` | Connexion Garmin, dernière synchro montre, dernière activité reçue, fraîcheur sommeil / Body Battery / FC repos — à appeler en début de routine planifiée (jamais mis en cache) |
 | `garmin_sync` | Rafraîchit toutes les données du jour en une fois, écrit dans `garmin_cache` |
-| `garmin_get_training_status` | Statut d'entraînement global + charge aiguë/chronique |
-| `garmin_get_body_battery` | Body Battery (valeur, chargé/déchargé) |
-| `garmin_get_vo2max` | VO2max course/vélo |
-| `garmin_get_resting_hr` | Fréquence cardiaque au repos |
+| `garmin_get_training_status` | Libellé Garmin (`training_status`) + charge aiguë/chronique |
+| `garmin_get_body_battery` | Niveau au réveil (`at_wake`), `min`/`max` du jour, dernier niveau (`latest`, `latest_at`), cumuls `charged`/`drained` ; `value` = `latest` (compat.) |
+| `garmin_get_vo2max` | VO2max course/vélo, date réelle de la valeur |
+| `garmin_get_resting_hr` | FC repos, `measured_on`, `last_sync_at`, `provisoire` (jour en cours, valeur encore recalculée) |
 | `garmin_get_sleep` | Détail du sommeil (durée, phases, score) |
 | `garmin_get_recent_activities` | Activités récentes normalisées (`course`/`velo`/`nage`/`renfo`) |
 | `garmin_get_training_load` | Charge aiguë/chronique détaillée, ratio, statut, cibles ACWR |
@@ -234,9 +273,10 @@ terminée sont immuables).
 
 | Tool | Rôle |
 |---|---|
-| `garmin_get_activity_weather` | Météo au moment d'une activité donnée (`activity_id`) |
-| `garmin_get_activity_details` | Séries FC / allure / dénivelé alignées sur un axe temps commun |
-| `garmin_get_swim_splits` | Longueurs de piscine d'une activité de nage (allure/FC/SWOLF par longueur) — `pace_min_per_km` de `garmin_get_activity_details` est toujours `null` en piscine, ce tool comble ce manque |
+| `garmin_analyse_activity` | **Analyse chiffrée côté serveur** (logique de `analyse_series.py`) : vue d'ensemble (temps en mouvement vs écoulé, pauses, distance), zones FC Friel, blocs d'effort (allure brute et corrigée de la pente, écart à la cible), récupérations (baisse de FC signée), découplage cardiaque sur effort continu ≥ 40 min. Paramètres `fc_seuil`, `allure_cible`, `type` (`auto`/`fractionne`/`seuil`/`endurance`). JSON de quelques centaines de tokens |
+| `garmin_get_activity_weather` | Météo d'une activité : °C, vent en km/h, distance station ↔ départ (`station_far` au-delà de 15 km) |
+| `garmin_get_activity_details` | Séries FC / allure / dénivelé / distance alignées sur le temps, `elapsed_s`, `moving_s`, `pauses`. `resolution_s` optionnel (ex. 5 = 1 point / 5 s, médiane) |
+| `garmin_get_swim_splits` | Longueurs de piscine (allure/FC/SWOLF) + `blocks` délimités par les repos ; longueurs aberrantes marquées `suspect: true` (conservées) |
 
 ### Garmin — séances structurées (écriture)
 
@@ -260,6 +300,10 @@ terminée sont immuables).
 
 Plusieurs tools s'écartent du schéma initialement envisagé, validés en conditions réelles :
 
+- **`garmin_get_training_status`** (seul changement non rétrocompatible des corrections
+  d'octobre 2026) : le libellé Garmin (ex. `PRODUCTIVE_1`) est désormais sous
+  `training_status` ; `status` porte l'état de la donnée (`ok`/`no_data`/`error`), commun à
+  tous les tools. Les métriques absentes valent `null` au lieu de `0`.
 - **`garmin_sync`** : `synced_at` est en **Europe/Paris**, pas en UTC — cohérent avec la
   contrainte générale de fuseau horaire (cf. [Fuseau horaire](#fuseau-horaire)).
 - **`garmin_get_recent_activities`** : chaque activité expose des champs supplémentaires.
