@@ -857,7 +857,7 @@ async def test_activity_details_cache_ignores_freshness_window(
 
     result = await tools["garmin_get_activity_details"]("999")
 
-    assert result == {"status": "ok", "elapsed_s": 0, "moving_s": 0, "pauses": [], "time_s": [0]}
+    assert result == {"status": "ok", "elapsed_s": 0, "moving_s": 0, "pauses": [], "time_s": [0], "sport": None}
     fake_client.get_activity_details.assert_not_called()
 
 

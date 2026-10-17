@@ -288,7 +288,7 @@ c'est elle que le client MCP reçoit comme description du tool.
 | `garmin_get_vo2max` | VO2max course/vélo, date réelle de la valeur |
 | `garmin_get_resting_hr` | FC repos, `measured_on`, `last_sync_at`, `provisoire` (jour en cours, valeur encore recalculée) |
 | `garmin_get_sleep` | Détail du sommeil (durée, phases, score) |
-| `garmin_get_recent_activities` | Activités récentes normalisées (`course`/`velo`/`nage`/`renfo`), `last_sync` ; `force_refresh=true` relit Garmin sans cache |
+| `garmin_get_recent_activities` | Activités récentes normalisées (`course`/`velo`/`nage`/`renfo`) ; vélo : `vitesse_moyenne_kmh`, `vitesse_max_kmh` ; `last_sync` ; `force_refresh=true` relit Garmin sans cache |
 | `garmin_get_training_load` | Charge aiguë/chronique détaillée, ratio, statut, cibles ACWR |
 | `garmin_get_training_load_balance` | Répartition mensuelle de charge (aérobie faible/élevée/anaérobique) |
 | `garmin_get_lactate_threshold` | Seuil lactique course (FC + allure) et FTP vélo |
@@ -298,10 +298,10 @@ c'est elle que le client MCP reçoit comme description du tool.
 
 | Tool | Rôle |
 |---|---|
-| `garmin_analyse_activity` | **Analyse chiffrée côté serveur** (logique de `analyse_series.py`) : vue d'ensemble (temps en mouvement vs écoulé, pauses, distance), zones FC Friel, blocs d'effort (allure brute et corrigée de la pente, écart à la cible), récupérations (variation de FC signée, « −12 bpm »), `elapsed_s` / `moving_s` / `pauses`, découplage cardiaque sur effort continu ≥ 40 min. Paramètres `fc_seuil`, `allure_cible`, `type` (`auto`/`fractionne`/`seuil`/`endurance`). JSON de quelques centaines de tokens |
+| `garmin_analyse_activity` | **Course et vélo.** Champ `sport` déduit du type Garmin. Vélo (sans puissance ni cadence) : vitesses en km/h, distance officielle Garmin (+ `distance_integree_km`), découplage FC/vitesse à travers les pauses ≤ `pause_merge_s` (défaut 120 s), blocs en km/h et `vitesse_cible_kmh`. `type_applique` décrit l'effet réel de `type`, `fc_seuil_utilisee` la FC seuil reçue (FC seuil vélo à passer pour le vélo). **Analyse chiffrée côté serveur** (logique de `analyse_series.py`) : vue d'ensemble (temps en mouvement vs écoulé, pauses, distance), zones FC Friel, blocs d'effort (allure brute et corrigée de la pente, écart à la cible), récupérations (variation de FC signée, « −12 bpm »), `elapsed_s` / `moving_s` / `pauses`, découplage cardiaque sur effort continu ≥ 40 min. Paramètres `fc_seuil`, `allure_cible`, `type` (`auto`/`fractionne`/`seuil`/`endurance`). JSON de quelques centaines de tokens |
 | `garmin_get_activity_feedback` | Auto-évaluation saisie sur la montre en fin d'activité : `sensations` (Très faible → Très fort) et `effort_percu_sur_10` (RPE) avec son libellé ; `no_data` si rien n'a été saisi (cache 1h, `no_data` jamais mis en cache) |
 | `garmin_get_activity_weather` | Météo d'une activité : °C, vent en km/h, distance station ↔ départ (`station_far` au-delà de 15 km) |
-| `garmin_get_activity_details` | Séries FC / allure / dénivelé / distance alignées sur le temps, `elapsed_s`, `moving_s`, `pauses`. `resolution_s` optionnel (ex. 5 = 1 point / 5 s, médiane) |
+| `garmin_get_activity_details` | Séries FC / allure / dénivelé / distance alignées sur le temps, `elapsed_s`, `moving_s`, `pauses`, `sport` ; vélo : série `speed_kmh` (l'allure min/km n'y a pas de sens). `resolution_s` optionnel (ex. 5 = 1 point / 5 s, médiane) |
 | `garmin_analyse_swim` | **Analyse de natation côté serveur, à utiliser à la place de la lecture manuelle des longueurs** : `overview` (temps nagé vs écoulé, repos, allure sur le temps nagé), `blocks` (allure, 1re/2e moitié, dérive, FC informative, SWOLF, repos), `suspect_lengths` (écart à la médiane du bloc > max(3 × 1,4826 × MAD, 30 %)), `css` (test de vitesse critique 400 m + 200 m détecté automatiquement ou `css_blocks` imposés, sensibilité, contrôle, écart à `target_css_min_per_100m`). Agrégats uniquement |
 | `garmin_get_swim_splits` | Longueurs de piscine (allure/FC/SWOLF) + `blocks` délimités par les repos (rôle échauffement / série / retour au calme, repos avant/après) + `totaux` (nage hors repos, repos) ; longueurs aberrantes marquées `suspect: true` (conservées) |
 

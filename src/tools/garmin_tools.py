@@ -499,9 +499,34 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
             _store_cache(conn, "activity_details", key, cached)
         return cached
 
+    def _activity_summary(activity_id: str) -> dict[str, Any] | None:
+        """Résumé officiel (sport, distance, durées, vitesses), cache sans expiration. Jamais
+        bloquant : None si Garmin ne répond pas (l'analyse retombe alors sur le comportement
+        historique, `sport` null)."""
+        key = str(activity_id)
+        cached = _get_cached(conn, "activity_summary", key, ignore_freshness=True)
+        if cached is not None:
+            return cached
+        try:
+            summary = client.get_activity_summary(activity_id)
+        except Exception as exc:
+            logger.info("résumé d'activité %s indisponible : %s", activity_id, exc)
+            return None
+        if not isinstance(summary, dict):
+            return None
+        if summary.get("status") == "ok":
+            _store_cache(conn, "activity_summary", key, summary)
+        return summary
+
     async def garmin_get_activity_details(activity_id: str, resolution_s: int | None = None) -> dict[str, Any]:
         """Séries temporelles d'une activité : `time_s` (temps écoulé, s), `heart_rate_bpm`,
-        `pace_min_per_km` (minutes décimales), `elevation_m`.
+        `pace_min_per_km` (minutes décimales), `elevation_m`, `distance_m` (cumulée), plus
+        `elapsed_s`, `moving_s` et `pauses`.
+
+        `sport` ("course" | "velo" | "nage" | "renfo" | type Garmin brut, null si le résumé
+        Garmin est indisponible). Pour le **vélo**, série supplémentaire `speed_kmh` (vitesse
+        en km/h, même échantillonnage) : c'est elle qu'il faut lire ; `pace_min_per_km` est
+        conservée pour compatibilité mais n'a pas de sens à vélo.
 
         `resolution_s` (optionnel) : sous-échantillonne à 1 point par tranche de N secondes
         (médiane), ex. 5 -> ~5x moins de tokens. Sans ce paramètre : séries complètes
@@ -524,17 +549,61 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         }
         if resolution_s is not None and resolution_s > 1:
             details = downsample(details, resolution_s)
-        return {"status": "ok" if t else "no_data", **timing, **details}
+        sport = (_activity_summary(activity_id) or {}).get("sport")
+        extra: dict[str, Any] = {"sport": sport}
+        if sport == "velo":
+            extra["speed_kmh"] = [
+                round(60 / p, 1) if isinstance(p, (int, float)) and p > 0 else None
+                for p in details.get("pace_min_per_km") or []
+            ]
+        return {"status": "ok" if t else "no_data", **timing, **details, **extra}
 
     async def garmin_analyse_activity(
-        activity_id: str, fc_seuil: float, allure_cible: float | None = None, type: str = "auto"
+        activity_id: str,
+        fc_seuil: float,
+        allure_cible: float | None = None,
+        type: str = "auto",
+        pause_merge_s: float | None = None,
+        vitesse_cible_kmh: float | None = None,
     ) -> dict[str, Any]:
-        """Analyse chiffrée d'une activité calculée côté serveur (logique du script
-        `analyse_series.py` de la Skill analyst), sans renvoyer les séries brutes.
+        """Analyse chiffrée d'une activité (course ou vélo) calculée côté serveur, sans
+        renvoyer les séries brutes. Le sport est déduit du type Garmin de l'activité (champ
+        `sport` : "course" | "velo" | ...).
 
-        Entrée : `fc_seuil` (FC au seuil lactique, bpm), `allure_cible` (optionnelle, allure
-        prévue des blocs en min/km décimales, ex. 4.0 = 4:00/km), `type` parmi
-        "auto" | "fractionne" | "seuil" | "endurance".
+        Entrée :
+        - `fc_seuil` (bpm, obligatoire, jamais inventé par le serveur ; renvoyé dans
+          `fc_seuil_utilisee`) : FC au seuil de la discipline. **Pour le vélo, passer la FC de
+          seuil vélo**, distincte de celle de la course (plus basse en général) : avec la FC
+          seuil course, les zones vélo sont surestimées.
+        - `allure_cible` (course, optionnelle) : allure prévue des blocs en min/km décimales.
+        - `vitesse_cible_kmh` (vélo, optionnelle) : vitesse prévue des blocs ; chaque bloc
+          reçoit `ecart_cible_kmh` et `verdict` (≤ 1 km/h conforme, ≤ 2,5 dérive, au-delà
+          hors cible).
+        - `type` : "auto" | "fractionne" | "seuil" | "endurance". Il ne règle QUE la détection
+          des blocs d'effort : "endurance" = aucun bloc ; "fractionne"/"seuil" = détection
+          forcée ; "auto" = blocs seulement si la vitesse/allure est nettement bimodale et la
+          FC plus haute dans les blocs. Sur une sortie régulière, "auto" et "endurance"
+          donnent donc le même résultat. Ce qui a été réellement appliqué est décrit dans
+          `type_applique` (`detection_blocs`, `allure_bimodale`, `effet`).
+        - `pause_merge_s` (optionnel) : pour le découplage cardiaque, fusionne les segments
+          séparés par une pause ≤ ce seuil (en s). Défaut vélo : 120 (feux, carrefours) ;
+          défaut course : aucune fusion (comportement historique inchangé).
+
+        Vélo (sans capteur de puissance ni cadence) : tout est exprimé en km/h, la distance
+        des moyennes est la distance officielle Garmin. `vue_ensemble` : `vitesse_moy_kmh`
+        (= distance officielle / temps chronométré Garmin, pauses exclues), `vitesse_max_kmh`
+        (résumé Garmin), `distance_km` (officielle), `distance_officielle_km`,
+        `distance_integree_km` (traçabilité), `duree_chrono_garmin_s`,
+        `centre_rapide_kmh` / `centre_lent_kmh` / `bascule_effort_recup_kmh` ; aucun champ en
+        min/km. Blocs : `vitesse_kmh`, sans allure « à plat » (la correction de pente propre à
+        la course n'est pas appliquée au vélo). `derive_cardiaque` : rapport FC / vitesse,
+        1re vs 2e moitié du temps en mouvement du plus long effort continu (≥ 40 min) après
+        fusion des pauses courtes, SANS correction de pente (le relief biaise donc la mesure
+        sur un parcours non symétrique) ; fenêtre utilisée dans `debut_s` / `fin_s` /
+        `duree_s` / `duree_mouvement_s`, pauses absorbées dans `pauses_fusionnees`.
+
+        Course : sortie historique inchangée, plus `distance_officielle_km` dans
+        `vue_ensemble` quand le résumé Garmin est disponible.
 
         Sortie (JSON compact, quelques centaines de tokens, jamais de séries brutes) :
         - `elapsed_s` (temps écoulé, pauses comprises), `moving_s` (temps en mouvement),
@@ -558,11 +627,26 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
             return _error(f"type invalide : {type} (attendu : {', '.join(ANALYSIS_TYPES)})")
         if not fc_seuil or fc_seuil <= 0:
             return _error(f"fc_seuil invalide : {fc_seuil}")
+        if pause_merge_s is not None and pause_merge_s < 0:
+            return _error(f"pause_merge_s invalide : {pause_merge_s}")
+        if vitesse_cible_kmh is not None and vitesse_cible_kmh <= 0:
+            return _error(f"vitesse_cible_kmh invalide : {vitesse_cible_kmh}")
         try:
             details = _activity_details(activity_id)
         except Exception as exc:
             return _garmin_error(exc)
-        return {"activity_id": str(activity_id), **analyse(details, fc_seuil, allure_cible, type)}
+        summary = _activity_summary(activity_id)
+        result = analyse(
+            details,
+            fc_seuil,
+            allure_cible,
+            type,
+            sport=(summary or {}).get("sport"),
+            summary=summary,
+            pause_merge_s=pause_merge_s,
+            vitesse_cible_kmh=vitesse_cible_kmh,
+        )
+        return {"activity_id": str(activity_id), **result}
 
     async def garmin_get_swim_splits(activity_id: str) -> dict[str, Any]:
         """Longueurs d'une séance de nage en piscine, regroupées en blocs.

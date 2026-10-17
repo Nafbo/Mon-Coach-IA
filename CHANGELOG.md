@@ -4,6 +4,37 @@ Toutes les évolutions sont **additives** : aucune clé de réponse existante n'
 retirée (vérifié par `tests/test_non_regression.py`, schémas figés le 17/10/2026), sauf
 l'exception signalée au 17/10/2026 (matin) pour `garmin_get_training_status`.
 
+## 2026-10-17 (soir) — Vélo route sans capteur de puissance
+
+### Ajouté
+- `GarminClient.get_activity_summary` : sport (`course` | `velo` | `nage` | ...), distance
+  officielle, temps chronométré / en mouvement / écoulé, vitesses moyenne et max (km/h) ;
+  mis en cache sans expiration (`activity_summary`). Types vélo reconnus en plus :
+  `track_cycling`, `recumbent_cycling`, `bmx`, `e_bike_fitness`, `e_bike_mountain`.
+- `garmin_get_recent_activities` (vélo uniquement) : `vitesse_moyenne_kmh` (distance
+  officielle / temps chronométré) et `vitesse_max_kmh` (null si absente).
+- `garmin_get_activity_details` : `sport` ; vélo : série `speed_kmh`.
+- `garmin_analyse_activity` : `sport`, `fc_seuil_utilisee`, `type_applique` ; paramètres
+  `pause_merge_s` et `vitesse_cible_kmh`. Vélo : vue d'ensemble en km/h (`vitesse_moy_kmh`,
+  `vitesse_max_kmh`, `centre_rapide_kmh`, `centre_lent_kmh`, `bascule_effort_recup_kmh`),
+  distance officielle (`distance_officielle_km`, `distance_integree_km`,
+  `source_distance: "garmin_officielle"`), blocs en `vitesse_kmh` (+ `ecart_cible_kmh`,
+  `verdict`), découplage FC/vitesse à travers les pauses ≤ 120 s (fenêtre `debut_s`,
+  `fin_s`, `duree_s`, `duree_mouvement_s`, `pauses_fusionnees`, `methode`). Course :
+  `distance_officielle_km` ajouté à côté de l'existant.
+
+### Décisions
+- `type` ne règle que la détection des blocs. Sur une sortie régulière, `auto` ne trouve
+  aucun bloc et donne donc le même résultat que `endurance` : ce n'était pas un paramètre
+  ignoré, mais un effet invisible. Il est désormais explicite (`type_applique`).
+- Pas de correction de pente pour le vélo (ni dans les blocs ni dans le découplage) : le
+  modèle de coût énergétique utilisé pour la course ne s'applique pas au vélo. Un
+  découplage ≤ −5 % est lu « négatif marqué » (relief ou vent différents entre les moitiés).
+- Vélo : les champs en min/km de `vue_ensemble` et des blocs ne sont pas renvoyés.
+- Écart de distance « 39,42 km contre 40,0 » : il venait d'une copie des séries mise en
+  cache avant l'ajout de `sumDistance` ; le vélo utilise désormais la distance officielle.
+  Pour la course, aucun champ existant n'est remplacé.
+
 ## 2026-10-17 (fin d'après-midi) — Analyse de natation côté serveur
 
 ### Ajouté

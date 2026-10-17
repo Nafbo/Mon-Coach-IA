@@ -43,6 +43,11 @@ ACTIVITY_TYPE_MAP: dict[str, str] = {
     "mountain_biking": "velo",
     "gravel_cycling": "velo",
     "cyclocross": "velo",
+    "track_cycling": "velo",
+    "recumbent_cycling": "velo",
+    "bmx": "velo",
+    "e_bike_fitness": "velo",
+    "e_bike_mountain": "velo",
     "lap_swimming": "nage",
     "open_water_swimming": "nage",
     "strength_training": "renfo",
@@ -448,6 +453,17 @@ class GarminClient:
                     "allure_moyenne_100m_mmss": _format_pace_mm_ss(allure_moyenne_min_100m),
                 }
             )
+            if normalized_type == "velo":
+                # Vitesse = distance officielle / temps chronométré (pauses montre exclues),
+                # comme la vitesse moyenne affichée par Garmin. Clés ajoutées au vélo
+                # seulement : les sorties course et nage restent strictement inchangées.
+                results[-1]["vitesse_moyenne_kmh"] = (
+                    round(distance_m / duration_seconds * 3.6, 1)
+                    if isinstance(distance_m, (int, float)) and distance_m > 0
+                    and isinstance(duration_seconds, (int, float)) and duration_seconds > 0
+                    else None
+                )
+                results[-1]["vitesse_max_kmh"] = _speed_kmh(act.get("maxSpeed"))
         results.sort(key=lambda a: a["date"], reverse=True)
         return results
 
@@ -545,6 +561,34 @@ class GarminClient:
             "cycling": {
                 "ftp_watts": cycling_ftp,
             },
+        }
+
+    def get_activity_summary(self, activity_id: str | int) -> dict[str, Any]:
+        """Résumé officiel d'une activité (`get_activity`) : `sport` ("course" | "velo" |
+        "nage" | "renfo" | type Garmin brut), `type_garmin`, `distance_km` (distance officielle),
+        `duree_s` (temps chronométré, pauses montre exclues), `moving_s` (temps en mouvement
+        Garmin, arrêts sans pause aussi exclus), `elapsed_s`, `vitesse_moy_kmh`,
+        `vitesse_max_kmh`. Valeurs absentes = null, jamais 0."""
+        raw = self._call(self._garmin.get_activity, str(activity_id))
+        data = raw if isinstance(raw, dict) else {}
+        summary = data.get("summaryDTO") or {}
+        type_key = (data.get("activityTypeDTO") or {}).get("typeKey")
+        distance = summary.get("distance")
+
+        def seconds(key: str) -> float | None:
+            value = summary.get(key)
+            return round(value, 1) if isinstance(value, (int, float)) and value > 0 else None
+
+        return {
+            "status": "ok" if type_key or summary else "no_data",
+            "sport": ACTIVITY_TYPE_MAP.get(type_key, type_key) if type_key else None,
+            "type_garmin": type_key,
+            "distance_km": round(distance / 1000, 2) if isinstance(distance, (int, float)) and distance > 0 else None,
+            "duree_s": seconds("duration"),
+            "moving_s": seconds("movingDuration"),
+            "elapsed_s": seconds("elapsedDuration"),
+            "vitesse_moy_kmh": _speed_kmh(summary.get("averageSpeed")),
+            "vitesse_max_kmh": _speed_kmh(summary.get("maxSpeed")),
         }
 
     def get_activity_feedback(self, activity_id: str | int) -> dict[str, Any]:
@@ -1019,6 +1063,13 @@ def _pace_min_per_km(speed_m_per_s: Any) -> float | None:
     if not isinstance(speed_m_per_s, (int, float)) or speed_m_per_s <= 0:
         return None
     return round(1000 / speed_m_per_s / 60, 2)
+
+
+def _speed_kmh(speed_m_per_s: Any) -> float | None:
+    """Vitesse m/s -> km/h (1 décimale) ; null si absente ou nulle."""
+    if not isinstance(speed_m_per_s, (int, float)) or speed_m_per_s <= 0:
+        return None
+    return round(speed_m_per_s * 3.6, 1)
 
 
 def _pace_min_per_100m(speed_m_per_s: Any) -> float | None:

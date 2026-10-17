@@ -36,6 +36,13 @@ _MIN_CLUSTER_SHARE = 0.10
 # seuil 3 × 6'30 (24725112038) -> +29 bpm ; footing avec arrêts (24737274389) -> +7 bpm.
 _MIN_BLOCK_HR_CONTRAST_BPM = 10
 _STRONG_PACE_GAP_MIN_KM = 60 / 60
+# Équivalents vélo, en km/h (un écart de 20 s/km ne veut rien dire à 25 km/h) : centres
+# effort / récup écartés d'au moins 5 km/h, écart « franc » (sans contrôle FC) dès 10 km/h.
+_MIN_CLUSTER_GAP_KMH = 5.0
+_STRONG_GAP_KMH = 10.0
+# Vélo : pauses absorbées par défaut pour le découplage (feux, carrefours, ravitaillement
+# court). La course garde son comportement historique (aucune fusion) sauf demande explicite.
+DEFAULT_PAUSE_MERGE_VELO_S = 120
 # Bornes Friel en fraction de la FC seuil.
 _ZONE_BOUNDS = [0.85, 0.90, 0.95, 1.00, 1.03]
 _ZONE_NAMES = ["Z1 recup", "Z2 endurance", "Z3 tempo", "Z4 seuil", "Z5a", "Z5b+"]
@@ -311,21 +318,220 @@ def _decoupling_reading(d: float) -> str:
 # ------------------------------------------------------------------------ main
 
 
+def _speed(pace: float | None) -> float | None:
+    """Allure min/km -> vitesse km/h."""
+    return 60 / pace if pace else None
+
+
+def _bimodal_velo(paces: list[float], fast: float, slow: float) -> bool:
+    """Vélo : deux régimes réels si les centres sont écartés d'au moins 5 km/h (le critère
+    course en s/km n'a pas de sens à 25 km/h) et chaque groupe >= 10 % des points."""
+    if _speed(fast) - _speed(slow) < _MIN_CLUSTER_GAP_KMH:
+        return False
+    threshold = (fast + slow) / 2
+    share_fast = sum(1 for p in paces if p <= threshold) / len(paces)
+    return _MIN_CLUSTER_SHARE <= share_fast <= 1 - _MIN_CLUSTER_SHARE
+
+
+def _detect_blocks(
+    t: list[int], hr: list, pace_smooth: list, valid_paces: list[float], fast: float, slow: float,
+    segs: list[tuple[int, int]], type: str, velo: bool,
+) -> tuple[list[tuple[int, int]], dict[str, Any]]:
+    """Blocs d'effort + description de ce que `type` a réellement fait (`type_applique`)."""
+    threshold = (fast + slow) / 2
+    info: dict[str, Any] = {"demande": type}
+    if type == "endurance":
+        info["detection_blocs"] = "desactivee"
+        info["effet"] = "aucun bloc recherché : séance traitée comme un effort continu"
+        return [], info
+    if type == "auto":
+        bimodal = _bimodal_velo(valid_paces, fast, slow) if velo else _is_bimodal(valid_paces, fast, slow)
+        info["detection_blocs"] = "automatique"
+        info["allure_bimodale"] = bimodal
+        if not bimodal:
+            info["effet"] = (
+                "aucun bloc : vitesse/allure trop régulière pour contenir des efforts distincts "
+                "(résultat identique à type=\"endurance\")"
+            )
+            return [], info
+    else:
+        info["detection_blocs"] = "forcee"
+    blocks: list[tuple[int, int]] = []
+    for i, j in segs:
+        blocks += [(i + a, i + b) for a, b in effort_blocks(t[i : j + 1], pace_smooth[i : j + 1], threshold)]
+    blocks.sort()
+    strong_gap = (
+        _speed(fast) - _speed(slow) >= _STRONG_GAP_KMH if velo else slow - fast >= _STRONG_PACE_GAP_MIN_KM
+    )
+    if type == "auto" and blocks and not strong_gap:
+        contrast = _hr_contrast(hr, blocks)
+        info["contraste_fc_bpm"] = _r(contrast, 1)
+        if contrast is not None and contrast < _MIN_BLOCK_HR_CONTRAST_BPM:
+            info["effet"] = "blocs candidats écartés : FC à peine plus haute que le reste (arrêts, relief)"
+            return [], info
+    info["effet"] = f"{len(blocks)} bloc(s) d'effort retenu(s)"
+    return blocks, info
+
+
+def merged_segments(
+    t: list[int], segs: list[tuple[int, int]], pause_merge_s: float
+) -> tuple[list[tuple[int, int]], list[list[dict[str, int]]]]:
+    """Fusionne les segments séparés par une pause <= `pause_merge_s`. Renvoie les segments
+    fusionnés et, pour chacun, la liste des pauses absorbées ({debut_s, duree_s})."""
+    if not segs:
+        return [], []
+    merged = [list(segs[0])]
+    absorbed: list[list[dict[str, int]]] = [[]]
+    for i, j in segs[1:]:
+        gap = t[i] - t[merged[-1][1]]
+        if gap <= pause_merge_s:
+            absorbed[-1].append({"debut_s": t[merged[-1][1]], "duree_s": gap})
+            merged[-1][1] = j
+        else:
+            merged.append([i, j])
+            absorbed.append([])
+    return [tuple(m) for m in merged], absorbed
+
+
+def _decoupling_moving_halves(t: list[int], hr: list, pa: list, i: int, j: int, velo: bool) -> float | None:
+    """Découplage sur un segment pouvant contenir des pauses fusionnées : moitiés égales en
+    TEMPS EN MOUVEMENT (une pause ne compte dans aucune moitié). Vélo : rapport FC / vitesse
+    (km/h) sans correction de pente ; course : FC × allure, comme cardiac_decoupling."""
+    total = moving_time(t, i, j)
+    acc, k = 0, j
+    for x in range(i, j):
+        step = t[x + 1] - t[x]
+        acc += step if step <= PAUSE_GAP_S else 0
+        if acc >= total / 2:
+            k = x + 1
+            break
+
+    def ratio(a: int, b: int) -> float | None:
+        h = [x for x in hr[a : b + 1] if x]
+        p = [x for x in pa[a : b + 1] if x and x < _MAX_PACE_SEGMENTATION]
+        if not h or not p:
+            return None
+        if velo:
+            return st.mean(h) / st.mean(60 / x for x in p)
+        return st.mean(h) * st.mean(p)
+
+    r1, r2 = ratio(i, k), ratio(k, j)
+    return None if not (r1 and r2) else (r2 - r1) / r1 * 100
+
+
+def _decoupling(
+    t: list[int], hr: list, pa: list, blocks: list[tuple[int, int]], segs: list[tuple[int, int]],
+    pause_merge_s: float | None, velo: bool,
+) -> dict[str, Any] | None:
+    """Découplage cardiaque sur le plus long effort continu >= 40 min. Sans `pause_merge_s`
+    (comportement historique course) : plus long segment sans pause ou plus long bloc. Avec :
+    segments fusionnés à travers les pauses courtes, longueur jugée en temps en mouvement."""
+    if pause_merge_s is None:
+        candidates = blocks if blocks else segs
+        longest = max(candidates, key=lambda s: t[s[1]] - t[s[0]])
+        if t[longest[1]] - t[longest[0]] < _MIN_DECOUPLING_S:
+            return None
+        d = cardiac_decoupling(t, hr, pa, *longest)
+        if d is None:
+            return None
+        return {
+            "debut_s": t[longest[0]],
+            "duree_s": t[longest[1]] - t[longest[0]],
+            "decouplage_pct": round(d, 1),
+            "lecture": _decoupling_reading(d),
+        }
+
+    if blocks:
+        candidates, absorbed = blocks, [[] for _ in blocks]
+    else:
+        candidates, absorbed = merged_segments(t, segs, pause_merge_s)
+    best = max(range(len(candidates)), key=lambda n: moving_time(t, *candidates[n]))
+    i, j = candidates[best]
+    moving = moving_time(t, i, j)
+    if moving < _MIN_DECOUPLING_S:
+        return None
+    d = _decoupling_moving_halves(t, hr, pa, i, j, velo)
+    if d is None:
+        return None
+    return {
+        "debut_s": t[i],
+        "fin_s": t[j],
+        "duree_s": t[j] - t[i],
+        "duree_mouvement_s": moving,
+        "pause_merge_s": pause_merge_s,
+        "pauses_fusionnees": absorbed[best],
+        "methode": (
+            "FC / vitesse (km/h), 1re vs 2e moitié du temps en mouvement, sans correction de pente"
+            if velo
+            else "FC × allure, 1re vs 2e moitié du temps en mouvement"
+        ),
+        "decouplage_pct": round(d, 1),
+        "lecture": _signed_decoupling_reading(d),
+    }
+
+
+def _signed_decoupling_reading(d: float) -> str:
+    """Lecture d'un découplage calculé à travers les pauses (vélo ou `pause_merge_s`) : comme
+    la lecture historique, mais une valeur nettement négative (2e moitié plus « économique »)
+    n'est pas « stable » : sans correction de pente, c'est le signe d'un relief ou d'un vent
+    différents entre les deux moitiés, pas d'une forme exceptionnelle."""
+    if d <= -5:
+        return "negatif marque (relief ou vent probablement differents entre les moities)"
+    return _decoupling_reading(d)
+
+
+def _velo_block(s: dict[str, Any], vitesse_cible_kmh: float | None) -> dict[str, Any]:
+    """Bloc vélo : vitesse en km/h à la place des allures (et sans allure « à plat » : la
+    correction de pente de la course ne s'applique pas au vélo)."""
+    speed = _speed(s["allure"])
+    out = {
+        "n": s["n"],
+        "debut_s": s["debut_s"],
+        "duree_s": s["duree_s"],
+        "dist_km": s["dist_km"],
+        "vitesse_kmh": _r(speed, 1),
+        "fc_moy": s["fc_moy"],
+        "fc_max": s["fc_max"],
+        "dplus_m": s["dplus_m"],
+        "pente_pct": s["pente_pct"],
+    }
+    if vitesse_cible_kmh and speed:
+        ecart = speed - vitesse_cible_kmh
+        out["ecart_cible_kmh"] = round(ecart, 1)
+        out["verdict"] = "conforme" if abs(ecart) <= 1 else "derive" if abs(ecart) <= 2.5 else "hors cible"
+    return out
+
+
 def analyse(
-    details: dict[str, Any], fc_seuil: float, allure_cible: float | None = None, type: str = "auto"
+    details: dict[str, Any],
+    fc_seuil: float,
+    allure_cible: float | None = None,
+    type: str = "auto",
+    *,
+    sport: str | None = None,
+    summary: dict[str, Any] | None = None,
+    pause_merge_s: float | None = None,
+    vitesse_cible_kmh: float | None = None,
 ) -> dict[str, Any]:
     """Analyse complète d'une activité ; renvoie un dict JSON compact.
 
-    `status` vaut "no_data" si la série est trop courte / sans allure (ex. natation en
-    piscine, sans vitesse continue — utiliser garmin_get_swim_splits).
+    `sport` ("course" | "velo" | ...) choisit l'expression des résultats : km/h, distance
+    officielle et découplage à travers les pauses courtes pour le vélo ; comportement
+    historique (min/km) sinon. `summary` = résumé officiel Garmin de l'activité
+    (`GarminClient.get_activity_summary`), optionnel. `status` vaut "no_data" si la série
+    est trop courte / sans allure (ex. natation en piscine — utiliser garmin_analyse_swim).
     """
+    velo = sport == "velo"
+    if velo and pause_merge_s is None:
+        pause_merge_s = DEFAULT_PAUSE_MERGE_VELO_S
+    summary = summary or {}
     t, hr, pa, el, di = load_series(details)
     has_distance = any(d is not None for d in di)
     pace_smooth = smooth(pa, 5)
     valid_paces = [p for p in pace_smooth if p and p < _MAX_PACE_SEGMENTATION]
     fast, slow = kmeans1d(valid_paces)
     if fast is None:
-        return {"status": "no_data", "message": "Série trop courte ou sans allure pour être segmentée."}
+        return {"status": "no_data", "sport": sport, "message": "Série trop courte ou sans allure pour être segmentée."}
     threshold = (fast + slow) / 2
 
     elapsed = t[-1] - t[0]
@@ -334,61 +540,61 @@ def analyse(
     hrs = [h for h in hr if h]
     avg_pace = moving / 60 / dist if dist else None
 
-    # Détection des blocs : "endurance" -> aucune ; "fractionne"/"seuil" -> toujours ;
-    # "auto" -> seulement si l'allure est réellement bimodale (pas de faux blocs sur un
-    # footing régulier).
-    if type == "endurance":
-        detect = False
-    elif type == "auto":
-        detect = _is_bimodal(valid_paces, fast, slow)
-    else:
-        detect = True
-
     segs = continuous_segments(t)
-    blocks: list[tuple[int, int]] = []
-    if detect:
-        for i, j in segs:
-            blocks += [(i + a, i + b) for a, b in effort_blocks(t[i : j + 1], pace_smooth[i : j + 1], threshold)]
-        blocks.sort()
-        if type == "auto" and blocks and slow - fast < _STRONG_PACE_GAP_MIN_KM:
-            contrast = _hr_contrast(hr, blocks)
-            if contrast is not None and contrast < _MIN_BLOCK_HR_CONTRAST_BPM:
-                blocks = []
+    blocks, type_info = _detect_blocks(t, hr, pace_smooth, valid_paces, fast, slow, segs, type, velo)
 
     block_list = []
     for n, (i, j) in enumerate(blocks, 1):
         s = {"n": n, **block_stats(t, hr, pa, el, i, j, di if has_distance else None)}
+        if velo:
+            block_list.append(_velo_block(s, vitesse_cible_kmh))
+            continue
         if allure_cible and s["allure"]:
             ecart = (s["allure"] - allure_cible) * 60
             s["ecart_cible_s_km"] = round(ecart)
             s["verdict"] = _verdict(ecart)
         block_list.append(s)
 
-    # Découplage cardiaque : uniquement sur un effort continu >= 40 min — le plus long
-    # segment sans pause si aucun bloc n'est détecté, sinon le plus long bloc (un segment
-    # mêlant efforts et récups n'a pas de découplage interprétable).
-    decoupling = None
-    candidates = blocks if blocks else segs
-    longest = max(candidates, key=lambda s: t[s[1]] - t[s[0]])
-    if t[longest[1]] - t[longest[0]] >= _MIN_DECOUPLING_S:
-        d = cardiac_decoupling(t, hr, pa, *longest)
-        if d is not None:
-            decoupling = {
-                "debut_s": t[longest[0]],
-                "duree_s": t[longest[1]] - t[longest[0]],
-                "decouplage_pct": round(d, 1),
-                "lecture": _decoupling_reading(d),
-            }
+    decoupling = _decoupling(t, hr, pa, blocks, segs, pause_merge_s, velo)
+    official_km = summary.get("distance_km")
+    common_fc = {
+        "fc_moy": _r(st.mean(hrs), 0) if hrs else None,
+        "fc_max": max(hrs) if hrs else None,
+        "fc_max_pct_seuil": round(max(hrs) / fc_seuil * 100) if hrs else None,
+    }
 
-    return {
-        "status": "ok",
-        "parametres": {"fc_seuil": fc_seuil, "allure_cible": allure_cible, "type": type},
-        # Temps écoulé (pauses comprises) vs temps en mouvement : distance et allure moyenne
-        # de `vue_ensemble` sont calculées sur le temps en mouvement.
-        "elapsed_s": elapsed,
-        "moving_s": moving,
-        "pauses": pauses(t),
-        "vue_ensemble": {
+    if velo:
+        chrono_s = summary.get("duree_s") or moving
+        distance = official_km if official_km is not None else dist
+        vue = {
+            "duree_s": moving,
+            "duree_mouvement_s": moving,
+            "duree_ecoulee_s": elapsed,
+            "duree_chrono_garmin_s": summary.get("duree_s"),
+            "pauses": pauses(t),
+            "source_distance": "garmin_officielle" if official_km is not None else (
+                "garmin" if has_distance else "integration_allure"
+            ),
+            "seance_continue": not blocks,
+            "distance_km": round(distance, 2),
+            "distance_officielle_km": official_km,
+            "distance_integree_km": round(dist, 2),
+            "vitesse_moy_kmh": round(distance / chrono_s * 3600, 1) if chrono_s else None,
+            "vitesse_max_kmh": summary.get("vitesse_max_kmh"),
+            **common_fc,
+            "bascule_effort_recup_kmh": _r(_speed(threshold), 1),
+            "centre_rapide_kmh": _r(_speed(fast), 1),
+            "centre_lent_kmh": _r(_speed(slow), 1),
+            "nb_segments": len(segs),
+        }
+        parametres = {
+            "fc_seuil": fc_seuil,
+            "vitesse_cible_kmh": vitesse_cible_kmh,
+            "type": type,
+            "pause_merge_s": pause_merge_s,
+        }
+    else:
+        vue = {
             "duree_s": moving,
             "duree_mouvement_s": moving,
             "duree_ecoulee_s": elapsed,
@@ -400,15 +606,31 @@ def analyse(
             "allure_moy_mmss": mmss(avg_pace),
             "pace_min_per_km": _r(avg_pace, 2),
             "pace_mmss": mmss(avg_pace),
-            "fc_moy": _r(st.mean(hrs), 0) if hrs else None,
-            "fc_max": max(hrs) if hrs else None,
-            "fc_max_pct_seuil": round(max(hrs) / fc_seuil * 100) if hrs else None,
+            **common_fc,
             "bascule_effort_recup": _r(threshold, 2),
             "bascule_effort_recup_mmss": mmss(threshold),
             "centre_rapide_mmss": mmss(fast),
             "centre_lent_mmss": mmss(slow),
             "nb_segments": len(segs),
-        },
+        }
+        if official_km is not None:
+            vue["distance_officielle_km"] = official_km
+        parametres = {"fc_seuil": fc_seuil, "allure_cible": allure_cible, "type": type}
+        if pause_merge_s is not None:
+            parametres["pause_merge_s"] = pause_merge_s
+
+    return {
+        "status": "ok",
+        "sport": sport,
+        "parametres": parametres,
+        "fc_seuil_utilisee": fc_seuil,
+        "type_applique": type_info,
+        # Temps écoulé (pauses comprises) vs temps en mouvement : distance et allure moyenne
+        # de `vue_ensemble` sont calculées sur le temps en mouvement.
+        "elapsed_s": elapsed,
+        "moving_s": moving,
+        "pauses": pauses(t),
+        "vue_ensemble": vue,
         "zones_fc": [z for z in hr_zones(hr, fc_seuil) if z["pct"] >= 0.5],
         "blocs": block_list,
         "recuperations": _recoveries(t, hr, blocks),
