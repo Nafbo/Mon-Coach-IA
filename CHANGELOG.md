@@ -4,6 +4,30 @@ Toutes les évolutions sont **additives** : aucune clé de réponse existante n'
 retirée (vérifié par `tests/test_non_regression.py`, schémas figés le 17/10/2026), sauf
 l'exception signalée au 17/10/2026 (matin) pour `garmin_get_training_status`.
 
+## 2026-11-11 — Séances de natation sur la montre (`garmin_push_workout`)
+
+### Ajouté
+- `garmin_push_workout` accepte `"discipline": "nage"` (piscine) avec un schéma propre :
+  `pool_length_m` (défaut 25), `warmup`/`cooldown`/`blocks` dont chaque step porte
+  `distance_m` (multiple de la longueur du bassin) ou `duration_sec`, `stroke`, `equipment`,
+  `drill`, `intensity`, `target` (`pace_min_per_100m` ou `hr_bpm`), `description`. Step
+  `"rest"` : repos fixe (`duration_sec`) ou libre jusqu'à l'appui sur Lap. `skip_last_rest`
+  par bloc.
+- `garmin_list_workouts` : `sportTypeKey` `swimming` mappé vers `nage`.
+
+### Format vérifié sur le compte réel (lecture seule)
+- Payload calqué sur une séance natation créée dans Garmin Connect et relue via
+  `/workout-service/workout/{id}`, identifiants pris dans `/workout-service/workout/types`.
+- Écart avec `garminconnect` 0.3.2 : natation = `sportTypeId` 4 côté API réelle (la lib dit
+  3, qui est `other`), donc `SwimmingWorkout` n'est pas utilisé ; intensité = cible
+  secondaire `swim.instruction` ; repos = condition `fixed.rest` (8) ou `lap.button` (1).
+- Validé en écriture réelle le 11/11/2026 : séance construite par le serveur uploadée
+  (sans programmation), relue puis supprimée. Tout est conservé par Garmin : sport 4,
+  bassin 25 m, distances, nages, pull-buoy, éducatif + description, intensité
+  `swim.instruction`, cible `pace.zone` (bornes en m/s), repos `fixed.rest` et `lap.button`,
+  répétitions et `skipLastRestStep`, estimations de distance/durée.
+- Non vérifié : l'affichage de la cible d'allure min/100m sur la montre elle-même.
+
 ## 2026-10-17 (soir, suite) — Fiabilité du découplage cardiaque vélo
 
 ### Ajouté (vélo uniquement ; `derive_cardiaque` de la course inchangé)

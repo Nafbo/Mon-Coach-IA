@@ -1071,14 +1071,15 @@ async def test_list_workouts_maps_discipline_and_passes_through_unknown(
     fake_client.get_scheduled_workouts.return_value = {
         "calendarItems": [
             {"itemType": "workout", "title": "Vélo", "date": "2026-08-10", "workoutId": 1, "sportTypeKey": "cycling"},
-            {"itemType": "workout", "title": "Autre", "date": "2026-08-11", "workoutId": 2, "sportTypeKey": "swimming"},
+            {"itemType": "workout", "title": "Nage", "date": "2026-08-12", "workoutId": 3, "sportTypeKey": "swimming"},
+            {"itemType": "workout", "title": "Autre", "date": "2026-08-11", "workoutId": 2, "sportTypeKey": "strength_training"},
         ]
     }
 
     result = await tools["garmin_list_workouts"]()
 
     disciplines = {w["workout_id"]: w["discipline"] for w in result["workouts"]}
-    assert disciplines == {1: "velo", 2: "swimming"}
+    assert disciplines == {1: "velo", 2: "strength_training", 3: "nage"}
 
 
 async def test_list_workouts_filters_by_date_range(tools: dict, fake_client: MagicMock) -> None:
@@ -1440,3 +1441,18 @@ def test_login_maps_too_many_requests_to_unavailable(tmp_path) -> None:
 
     with pytest.raises(GarminUnavailableError):
         gc.get_training_status(date(2026, 8, 5))
+
+
+async def test_push_workout_swim_dry_run(tools: dict, fake_client: MagicMock) -> None:
+    structure = {
+        "discipline": "nage",
+        "warmup": {"distance_m": 200},
+        "blocks": [{"repeat": 6, "steps": [{"distance_m": 100}, {"type": "rest", "duration_sec": 20}]}],
+    }
+
+    result = await tools["garmin_push_workout"]("2026-11-13", "13/11 - Natation 6x100", structure)
+
+    assert result["status"] == "dry_run"
+    assert result["payload"]["workoutName"] == "13/11 - Natation 6x100"
+    assert result["payload"]["sportType"]["sportTypeId"] == 4
+    fake_client.upload_workout.assert_not_called()

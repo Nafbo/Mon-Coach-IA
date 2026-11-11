@@ -143,7 +143,7 @@ def _find_duplicate_scheduled_workout(raw: Any, *, name: str, date_str: str) -> 
 # compte) : reprend exactement les clés que build_workout écrit lui-même (cf. _SPORT_TYPE dans
 # src/workout_builder.py) — une clé absente de cette table est retournée telle quelle plutôt
 # que de lever une erreur (même tolérance que ACTIVITY_TYPE_MAP dans src/garmin_client.py).
-_SPORT_TYPE_KEY_TO_DISCIPLINE = {"running": "course", "cycling": "velo"}
+_SPORT_TYPE_KEY_TO_DISCIPLINE = {"running": "course", "cycling": "velo", "swimming": "nage"}
 
 
 def _scheduled_workout_summary(entry: dict[str, Any]) -> dict[str, Any]:
@@ -784,7 +784,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
     async def garmin_push_workout(
         date: str, name: str, structure: dict[str, Any], dry_run: bool = True
     ) -> dict[str, Any]:
-        """Construit et programme une séance structurée (course ou vélo) sur la montre Garmin.
+        """Construit et programme une séance structurée (course, vélo ou natation) sur la montre Garmin.
 
         `structure` (clés reconnues au niveau racine : `discipline`, `warmup`, `blocks`,
         `cooldown` — toute autre clé, ex. `intervals`/`repeats`/`repeat`/`steps`/`main`,
@@ -836,6 +836,57 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         `warmup`/`cooldown` sont toujours bornés en temps (`duration_sec` obligatoire). Les
         steps `interval`/`recovery` à l'intérieur d'un bloc peuvent être bornés en temps OU en
         distance.
+
+        NATATION (`"discipline": "nage"`, piscine) — schéma propre :
+
+            {
+              "discipline": "nage",
+              "pool_length_m": 25,                  # optionnel, défaut 25 (50 en grand bassin)
+              "warmup":   <step nage>,              # optionnel, sans "type"
+              "blocks": [                           # optionnel
+                {"repeat": <int, défaut 1>, "skip_last_rest": <bool, défaut false>,
+                 "steps": [<step nage>, ...]},
+              ],
+              "cooldown": <step nage>,              # optionnel, sans "type"
+            }
+
+        `<step nage>` :
+            {
+              "type": "interval" | "recovery" | "rest",   # défaut "interval" dans un bloc
+              "distance_m": <float>,     # multiple de pool_length_m — exactement l'un des deux
+              "duration_sec": <float>,   # (sauf "rest")
+              "stroke": "free" | "backstroke" | "breaststroke" | "fly" | "individual_medley" |
+                        "mixed" | "drill" | "any_stroke",            # défaut "free"
+              "equipment": "pull_buoy" | "paddles" | "fins" | "kickboard" | "snorkel",
+              "drill": "kick" | "pull" | "drill",        # jambes / bras / éducatif
+              "intensity": "recovery" | "very_easy" | "easy" | "moderate" | "hard" |
+                           "very_hard" | "all_out" | "fast" | "ascend" | "descend",
+              "target": {"type": "pace_min_per_100m" | "hr_bpm", "low": <float>, "high": <float>},
+              "description": "<texte affiché sur la montre, ex. consigne d'éducatif>",
+            }
+        Un step `"rest"` n'accepte que `duration_sec` (repos fixe, en secondes) et
+        `description` ; sans `duration_sec`, repos libre jusqu'à l'appui sur Lap.
+        Allure en min/100m décimales (1:45/100m -> 1.75).
+
+        Exemple — 300 échauffement, 4x50 éducatifs r15", 8x100 à 1:50-1:55 r20", 200 retour
+        au calme pull-buoy :
+
+            {
+              "discipline": "nage",
+              "pool_length_m": 25,
+              "warmup": {"distance_m": 300, "intensity": "easy"},
+              "blocks": [
+                {"repeat": 4, "steps": [
+                  {"distance_m": 50, "drill": "drill", "description": "Rattrapé"},
+                  {"type": "rest", "duration_sec": 15}]},
+                {"repeat": 8, "skip_last_rest": true, "steps": [
+                  {"distance_m": 100,
+                   "target": {"type": "pace_min_per_100m", "low": 1.833, "high": 1.917}},
+                  {"type": "rest", "duration_sec": 20}]}
+              ],
+              "cooldown": {"distance_m": 200, "stroke": "any_stroke", "equipment": "pull_buoy",
+                           "intensity": "easy"}
+            }
 
         `dry_run=True` (défaut) : construit le payload sans appel d'écriture réel, à inspecter
         avant tout envoi réel avec `dry_run=False`.
@@ -900,7 +951,7 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         général.
 
         Chaque entrée : `workout_id` (utilisable tel quel avec `garmin_delete_workout`),
-        `name`, `date` (YYYY-MM-DD), `discipline` (`course`/`velo`/clé Garmin brute si
+        `name`, `date` (YYYY-MM-DD), `discipline` (`course`/`velo`/`nage`/clé Garmin brute si
         inconnue).
 
         Précision Garmin "workout" vs "scheduled workout" : un `workout` est le

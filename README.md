@@ -55,7 +55,7 @@ mcp-garmin-coach/
 │   ├── server.py                 # point d'entrée, création de l'app MCP, montage des tools
 │   ├── auth.py                   # segment secret dans l'URL, protection DNS-rebinding
 │   ├── garmin_client.py          # wrapper autour de garminconnect (login, cache session, parsing)
-│   ├── workout_builder.py        # construction de payloads de séances structurées (course/vélo)
+│   ├── workout_builder.py        # construction de payloads de séances structurées (course/vélo/natation)
 │   ├── db.py                     # connexion SQLite, création des tables au démarrage
 │   ├── tools/
 │   │   ├── garmin_tools.py       # tools garmin_*
@@ -309,7 +309,7 @@ c'est elle que le client MCP reçoit comme description du tool.
 
 | Tool | Rôle |
 |---|---|
-| `garmin_push_workout` | Construit et programme une séance structurée (course/vélo) sur la montre. `dry_run=True` par défaut — ne fait jamais d'appel d'écriture réel sans `dry_run=False` explicite. Anti-doublon + retry à la programmation |
+| `garmin_push_workout` | Construit et programme une séance structurée (course/vélo/natation en piscine) sur la montre. Natation (`discipline: "nage"`) : longueur de bassin, nage, matériel, éducatifs, intensité, allure min/100m, repos fixe ou au bouton Lap. `dry_run=True` par défaut — ne fait jamais d'appel d'écriture réel sans `dry_run=False` explicite. Anti-doublon + retry à la programmation |
 | `garmin_list_workouts` | Liste les séances programmées sur le calendrier (créées via `garmin_push_workout`), avec `workout_id`/`name`/`date`/`discipline`. Filtres `start_date`/`end_date` optionnels (sans filtre : fenêtre J-30/J+60) |
 | `garmin_delete_workout` | Supprime un workout (nettoyage, ex. séance de test) — supprime le *template*, pas seulement son occurrence de calendrier (cf. "Écarts volontaires" ci-dessous) |
 
