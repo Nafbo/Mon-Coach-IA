@@ -292,3 +292,87 @@ async def test_merge_tool_refuses_when_no_ride_overlaps(garmin: MagicMock, mywho
     result = await build_mywhoosh_tools(garmin, mywhoosh)["mywhoosh_merge_hr"](garmin_activity_id=42)
     assert result["status"] == "error"
     garmin.upload_activity_file.assert_not_called()
+
+
+# -- séances MyWhoosh ---------------------------------------------------------------
+
+from src import mywhoosh_workout as mw
+
+THRESHOLD_BLOCKS = [
+    {"type": "warmup", "duration_s": 600, "start_pct": 50, "end_pct": 75, "message": "On s'échauffe"},
+    {"type": "intervals", "repeat": 3, "on_s": 600, "on_pct": 95, "off_s": 300, "off_pct": 55, "cadence": 90},
+    {"type": "steady", "duration_s": 300, "power_pct": 65},
+    {"type": "cooldown", "duration_s": 300, "start_pct": 60, "end_pct": 40},
+]
+
+
+def test_build_workout_matches_workout_builder_format() -> None:
+    w = mw.build_workout("Seuil 3x10", THRESHOLD_BLOCKS, ftp_w=200, workout_id=123)
+    steps = w["WorkoutStepsArray"]
+
+    assert w["Id"] == 123 and w["Mode"] == "E_Ride" and w["IsIntervals"] is True
+    assert w["StepCount"] == len(steps) == 1 + 6 + 1 + 1
+    assert w["Time"] == 600 + 3 * 900 + 300 + 300
+    assert [s["Id"] for s in steps] == list(range(1, len(steps) + 1))
+    warmup = steps[0]
+    assert (warmup["StepType"], warmup["StartPower"], warmup["EndPower"]) == ("E_WarmUp", 0.5, 0.75)
+    assert warmup["WorkoutMessage"] == [{"Id": 1, "Time": 0, "Message": "On s'échauffe"}]
+    on, off = steps[1], steps[2]
+    assert (on["Power"], on["Time"], on["Rpm"], on["IntervalId"]) == (0.95, 600, 90, 1)
+    assert (off["Power"], off["Time"], off["IntervalId"]) == (0.55, 300, 1)
+    assert steps[-1]["StepType"] == "E_CoolDown"
+    assert 0.8 < w["IF"] < 0.9 and w["TSS"] > 0 and w["KJ"] > 0
+
+
+@pytest.mark.parametrize(
+    "blocks, fragment",
+    [
+        ([], "au moins un bloc"),
+        ([{"type": "sprint", "duration_s": 10}], "type inconnu"),
+        ([{"type": "steady", "duration_s": 600}], "power_pct"),
+        ([{"type": "steady", "duration_s": 600, "power_pct": 400}], "entre 0 et 300"),
+        ([{"type": "steady", "duration_s": 60, "power_pct": 80, "messages": [{"at_s": 90, "text": "x"}]}], "hors de l'étape"),
+    ],
+)
+def test_build_workout_rejects_invalid_blocks(blocks: list, fragment: str) -> None:
+    with pytest.raises(mw.WorkoutError, match=fragment):
+        mw.build_workout("Test", blocks)
+
+
+async def test_push_workout_dry_run_by_default(garmin: MagicMock, mywhoosh: MagicMock) -> None:
+    result = await build_mywhoosh_tools(garmin, mywhoosh)["mywhoosh_push_workout"]("Seuil 3x10", THRESHOLD_BLOCKS)
+    assert result["status"] == "dry_run" and result["seance"]["duree_minutes"] == 65
+    mywhoosh.upload_custom_workout.assert_not_called()
+
+
+async def test_push_workout_creates_once(garmin: MagicMock, mywhoosh: MagicMock) -> None:
+    tool = build_mywhoosh_tools(garmin, mywhoosh)["mywhoosh_push_workout"]
+    mywhoosh.list_custom_workouts.return_value = []
+    created = await tool("Seuil 3x10", THRESHOLD_BLOCKS, dry_run=False)
+    assert created["status"] == "created"
+    sent = mywhoosh.upload_custom_workout.call_args.args[0]
+    assert sent["Name"] == "Seuil 3x10" and sent["StepCount"] == 9
+
+    mywhoosh.list_custom_workouts.return_value = [{"Name": "Seuil 3x10"}]
+    again = await tool("Seuil 3x10", THRESHOLD_BLOCKS, dry_run=False)
+    assert again["status"] == "already_present"
+    assert mywhoosh.upload_custom_workout.call_count == 1
+
+
+async def test_push_workout_invalid_input_and_api_error(garmin: MagicMock, mywhoosh: MagicMock) -> None:
+    tool = build_mywhoosh_tools(garmin, mywhoosh)["mywhoosh_push_workout"]
+    bad = await tool("Test", [{"type": "steady"}], dry_run=False)
+    assert bad["error_type"] == "invalid_input"
+    mywhoosh.list_custom_workouts.return_value = []
+    mywhoosh.upload_custom_workout.side_effect = MyWhooshError("séance refusée par MyWhoosh : quota", "unknown")
+    failed = await tool("Test", THRESHOLD_BLOCKS, dry_run=False)
+    assert failed["status"] == "error" and "quota" in failed["message"]
+
+
+def test_user_id_read_from_jwt() -> None:
+    import base64, json as _json
+
+    payload = base64.urlsafe_b64encode(_json.dumps({"userId": "u-1"}).encode()).decode().rstrip("=")
+    client = MyWhooshClient("a@b.c", "pw", device_id="d")
+    client._token = f"h.{payload}.s"
+    assert client._user_id() == "u-1"

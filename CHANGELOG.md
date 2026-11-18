@@ -4,6 +4,19 @@ Toutes les évolutions sont **additives** : aucune clé de réponse existante n'
 retirée (vérifié par `tests/test_non_regression.py`, schémas figés le 17/10/2026), sauf
 l'exception signalée au 17/10/2026 (matin) pour `garmin_get_training_status`.
 
+## 2026-11-18 (soir) — Séances home trainer vers MyWhoosh (`mywhoosh_push_workout`)
+
+### Ajouté
+- `mywhoosh_push_workout` : crée une séance vélo dans « MyWorkout » à partir de blocs en %
+  de FTP (échauffement, paliers, intervalles, rampes, retour au calme, roue libre), avec
+  cadence et messages ; `dry_run` par défaut, pas de doublon par nom.
+- `MyWhooshClient` : `list_custom_workouts`, `upload_custom_workout` (API du Workout
+  Builder, même jeton que l'app mobile).
+
+### Vérifié sur le compte réel
+- 18/11 : « 21/11 - Reprise cadence » (séance 241 du plan, 69 min, 14 étapes, IF 0,60,
+  TSS 41,8) créée et relue dans la liste des séances perso MyWhoosh.
+
 ## 2026-11-18 — Import MyWhoosh vers Garmin (`mywhoosh_sync`, `mywhoosh_merge_hr`)
 
 ### Ajouté

@@ -18,6 +18,8 @@ from src.fit_device import FitFormatError, _parse, heart_rate_series, inject_hea
 from src.garmin_client import ACTIVITY_TYPE_MAP, GarminClient
 from src.models import PARIS_TZ
 from src.mywhoosh_client import MyWhooshClient, MyWhooshError
+from src.mywhoosh_workout import SPORT_BIKE, WorkoutError, build_workout
+from src.mywhoosh_workout import summarize as summarize_workout
 from src.tools.garmin_tools import _error, _garmin_error
 
 logger = logging.getLogger(__name__)
@@ -259,4 +261,49 @@ def build_mywhoosh_tools(
                 result["message"] = f"activité fusionnée importée, mais suppression de l'originale échouée : {_garmin_error(exc)['message']}"
         return {"status": "ok", **result}
 
-    return {"mywhoosh_sync": mywhoosh_sync, "mywhoosh_merge_hr": mywhoosh_merge_hr}
+    async def mywhoosh_push_workout(
+        name: str,
+        blocks: list[dict[str, Any]],
+        description: str | None = None,
+        ftp_w: int | None = None,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Crée une séance vélo home trainer dans le dossier « MyWorkout » de MyWhoosh
+        (même appel que le bouton d'export du Workout Builder). Intensités en % de FTP : la
+        séance suit la FTP réglée dans MyWhoosh. `blocks`, dans l'ordre :
+        {"type": "warmup"|"cooldown"|"ramp", "duration_s", "start_pct", "end_pct"} ;
+        {"type": "steady", "duration_s", "power_pct"} ;
+        {"type": "intervals", "repeat", "on_s", "on_pct", "off_s", "off_pct"} ;
+        {"type": "free", "duration_s"}. Optionnels : `cadence` (rpm), `off_cadence`
+        (récup des intervalles), `message` (affiché au début du bloc) ou `messages`
+        [{"at_s", "text"}]. `ftp_w` (facultatif) sert seulement à estimer les kcal.
+        `dry_run=true` par défaut : renvoie le déroulé construit sans rien envoyer ; passer
+        `dry_run=false` pour créer réellement la séance. Une séance du même nom déjà dans
+        « MyWorkout » n'est pas recréée (`already_present`). Sortie : `status` "dry_run" |
+        "created" | "already_present" | "error", `seance` (déroulé, IF et TSS estimés)."""
+        try:
+            workout = build_workout(name, blocks, description=description, ftp_w=ftp_w)
+        except WorkoutError as exc:
+            return _error(str(exc))
+        preview = summarize_workout(workout)
+        if dry_run:
+            return {"status": "dry_run", "seance": preview}
+        if mywhoosh is None:
+            return _error(
+                "MyWhoosh non configuré : renseigner MYWHOOSH_EMAIL et MYWHOOSH_PASSWORD dans le .env",
+                "auth",
+            )
+        try:
+            existing = mywhoosh.list_custom_workouts(SPORT_BIKE)
+            if any(str(w.get("Name") or w.get("name") or "").strip() == workout["Name"] for w in existing):
+                return {"status": "already_present", "seance": preview}
+            mywhoosh.upload_custom_workout(workout, SPORT_BIKE)
+        except MyWhooshError as exc:
+            return _error(f"MyWhoosh : {exc}", exc.error_type)
+        return {"status": "created", "seance": preview, "dossier": "MyWorkout (app MyWhoosh)"}
+
+    return {
+        "mywhoosh_sync": mywhoosh_sync,
+        "mywhoosh_merge_hr": mywhoosh_merge_hr,
+        "mywhoosh_push_workout": mywhoosh_push_workout,
+    }

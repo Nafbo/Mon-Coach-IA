@@ -8,6 +8,7 @@ message explicite plutôt que de deviner.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import urllib.error
@@ -21,6 +22,9 @@ logger = logging.getLogger(__name__)
 LOGIN_URL = "https://services.mywhoosh.com/http-service/api/login"
 ACTIVITIES_URL = "https://service14.mywhoosh.com/v2/rider/profile/activities"
 DOWNLOAD_URL = "https://service14.mywhoosh.com/v2/rider/profile/download-activity-file"
+# Workout Builder (workout.mywhoosh.com) : même jeton que l'app mobile.
+MY_WORKOUTS_URL = "https://coaching.mywhoosh.com/api/v2/workout-builder/my-workouts"
+WORKOUT_UPLOAD_URL = "https://coaching.mywhoosh.com/api/v2/client/custom-workout-upload"
 _TIMEOUT_S = 30
 
 
@@ -135,6 +139,47 @@ class MyWhooshClient:
             if isinstance(inner, list):
                 return [a for a in inner if isinstance(a, dict)]
         raise MyWhooshError("format de la liste des sorties MyWhoosh inattendu", "unknown")
+
+    def _user_id(self) -> str:
+        """`userId` lu dans le jeton (JWT), comme le fait le Workout Builder."""
+        if self._token is None:
+            self._login()
+        try:
+            payload = self._token.split(".")[1]  # type: ignore[union-attr]
+            claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        except (IndexError, ValueError) as exc:
+            raise MyWhooshError("jeton MyWhoosh illisible", "unknown") from exc
+        user_id = claims.get("userId") or claims.get("UserId")
+        if not user_id:
+            raise MyWhooshError("identifiant utilisateur absent du jeton MyWhoosh", "unknown")
+        return str(user_id)
+
+    def _authed_get(self, url: str) -> Any:
+        if self._token is None:
+            self._login()
+        try:
+            return _json(_http(url, token=self._token))
+        except MyWhooshError as exc:
+            if exc.error_type != "auth":
+                raise
+            self._login()
+            return _json(_http(url, token=self._token))
+
+    def list_custom_workouts(self, sport: int = 0) -> list[dict[str, Any]]:
+        """Séances perso du dossier « MyWorkout » (0 = vélo)."""
+        data = self._authed_get(f"{MY_WORKOUTS_URL}/{sport}")
+        items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise MyWhooshError("format de la liste des séances MyWhoosh inattendu", "unknown")
+        return [w for w in items if isinstance(w, dict)]
+
+    def upload_custom_workout(self, workout: dict[str, Any], sport: int = 0) -> Any:
+        """Enregistre une séance dans « MyWorkout » (appel du bouton d'export du Workout Builder)."""
+        payload = {"UserId": self._user_id(), "SportsModeType": sport, "WorkoutsData": [workout]}
+        data = self._authed(WORKOUT_UPLOAD_URL, payload)
+        if isinstance(data, dict) and data.get("status") is False:
+            raise MyWhooshError(f"séance refusée par MyWhoosh : {data.get('message') or 'raison inconnue'}", "unknown")
+        return data
 
     def download_fit(self, activity: dict[str, Any]) -> bytes:
         file_id = activity.get("activityFileId")

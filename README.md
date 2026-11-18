@@ -58,6 +58,7 @@ mcp-garmin-coach/
 │   ├── workout_builder.py        # construction de payloads de séances structurées (course/vélo/natation)
 │   ├── mywhoosh_client.py        # client MyWhoosh (API interne de l'app mobile : login, sorties, FIT)
 │   ├── fit_device.py             # lecture/patch de fichiers FIT sans dépendance (Edge 840, injection FC)
+│   ├── mywhoosh_workout.py       # séances home trainer au format JSON du Workout Builder MyWhoosh
 │   ├── db.py                     # connexion SQLite, création des tables au démarrage
 │   ├── tools/
 │   │   ├── garmin_tools.py       # tools garmin_*
@@ -251,7 +252,7 @@ permanent change, sa clé est versionnée (ex. `activity_weather_v2`).
 
 ## Tools MCP exposés
 
-31 tools au total. La description détaillée de chaque tool (entrées, sorties, unités, états
+32 tools au total. La description détaillée de chaque tool (entrées, sorties, unités, états
 d'erreur) est sa docstring dans `src/tools/garmin_tools.py` / `src/tools/mywhoosh_tools.py` /
 `src/tools/operational_tools.py` :
 c'est elle que le client MCP reçoit comme description du tool.
@@ -331,6 +332,8 @@ Garmin le compte dans la charge et le statut d'entraînement.
 |---|---|
 | `mywhoosh_sync` | Importe les `count` dernières sorties MyWhoosh (1 à 10). Une sortie déjà couverte par une activité Garmin qui la **chevauche dans le temps** (± 5 min, sans tenir compte du nom) est sautée : `deja_present`, sauf `force=true`. `dry_run=true` ne fait que lister. Statut par sortie : `importe` (+ `activity_id`), `deja_present`, `a_importer`, `erreur` |
 | `mywhoosh_merge_hr` | **Séance enregistrée en double** (« Vélo d'intérieur » sur la montre + MyWhoosh) : injecte la FC de l'activité montre `garmin_activity_id` dans le FIT MyWhoosh qui la chevauche (FC par seconde à ± 5 s, FC moy/max des tours et de la session ; les 0 bpm écrits par MyWhoosh sans capteur deviennent « pas de valeur »), puis importe une seule activité avec puissance **et** FC. `delete_original=true` supprime ensuite **définitivement** l'activité montre — sinon la séance compte deux fois dans la charge ; à ne passer qu'après accord explicite |
+
+| `mywhoosh_push_workout` | Crée une séance vélo dans le dossier **« MyWorkout »** de l'app MyWhoosh (même appel que le bouton d'export du Workout Builder, `coaching.mywhoosh.com`, même jeton que l'app). Blocs `warmup`/`cooldown`/`ramp` (`start_pct`→`end_pct`), `steady` (`power_pct`), `intervals` (`repeat`, `on_s`/`on_pct`, `off_s`/`off_pct`), `free` ; `cadence`, `off_cadence`, `message`/`messages` optionnels. Intensités en **% de FTP** (la séance suit la FTP réglée dans MyWhoosh), IF et TSS estimés. `dry_run=True` par défaut ; une séance du même nom déjà présente n'est pas recréée (`already_present`) |
 
 Usage recommandé : lancer « Vélo d'intérieur » sur la montre en même temps que MyWhoosh, puis
 `mywhoosh_merge_hr`. Sans la montre, `mywhoosh_sync` (pas de FC : Garmin ne calcule alors ni
@@ -536,6 +539,11 @@ conditions d'utilisation de MyWhoosh n'autorisent probablement pas cet usage. Po
   est retrouvé par chevauchement horaire (jusqu'à 4 essais espacés de 3 s), sinon `null`.
 - **Doublon exact** : Garmin répond HTTP 409 à un fichier déjà importé, remonté en
   `deja_present`.
+- **Séances (`mywhoosh_push_workout`)** : format JSON et appel relevés dans le code du Workout
+  Builder (`workout.mywhoosh.com`, export JSON et bouton d'enregistrement) le 18/11/2026 ;
+  puissance en fraction de FTP (0.75 = 75 %), répétitions aplaties en étapes partageant un
+  `IntervalId`. Suppression d'une séance non exposée : à faire dans l'app ou sur
+  workout.mywhoosh.com.
 
 ## Déploiement production
 
