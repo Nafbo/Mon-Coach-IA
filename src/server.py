@@ -17,7 +17,9 @@ from starlette.types import ASGIApp
 from src.auth import AccessLogMiddleware, SecretPathMiddleware, build_transport_security, mcp_mount_path
 from src.db import get_connection, init_db
 from src.garmin_client import GarminClient
+from src.mywhoosh_client import MyWhooshClient, load_device_id
 from src.tools.garmin_tools import build_garmin_tools
+from src.tools.mywhoosh_tools import build_mywhoosh_tools
 from src.tools.operational_tools import build_operational_tools
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,7 @@ def build_app(
     garmin_client: GarminClient,
     secret: str,
     public_domain: str | None = None,
+    mywhoosh_client: MyWhooshClient | None = None,
 ) -> ASGIApp:
     """Construit l'app ASGI complète (MCP + auth par segment secret) à partir de dépendances déjà créées.
 
@@ -69,6 +72,7 @@ def build_app(
     all_tools = {
         **build_garmin_tools(garmin_client, conn),
         **build_operational_tools(conn),
+        **build_mywhoosh_tools(garmin_client, mywhoosh_client),
     }
     for name, func in all_tools.items():
         _register_tool(mcp, name, func)
@@ -98,7 +102,26 @@ def create_app_from_env() -> ASGIApp:
     tokenstore_path = str(Path(db_path).resolve().parent / "garmin_tokens")
     garmin_client = GarminClient(email, password, tokenstore_path)
 
-    return build_app(conn=conn, garmin_client=garmin_client, secret=secret, public_domain=public_domain)
+    # Optionnel : sans identifiants MyWhoosh, `mywhoosh_sync` répond « non configuré ».
+    mywhoosh_email = os.environ.get("MYWHOOSH_EMAIL")
+    mywhoosh_password = os.environ.get("MYWHOOSH_PASSWORD")
+    mywhoosh_client = (
+        MyWhooshClient(
+            mywhoosh_email,
+            mywhoosh_password,
+            device_id=load_device_id(Path(db_path).resolve().parent / "mywhoosh_device_id"),
+        )
+        if mywhoosh_email and mywhoosh_password
+        else None
+    )
+
+    return build_app(
+        conn=conn,
+        garmin_client=garmin_client,
+        secret=secret,
+        public_domain=public_domain,
+        mywhoosh_client=mywhoosh_client,
+    )
 
 
 app = create_app_from_env()

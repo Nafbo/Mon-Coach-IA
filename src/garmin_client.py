@@ -9,8 +9,10 @@ inspecter le contenu brut de `garmin_cache` pour confirmer/ajuster le parsing si
 
 from __future__ import annotations
 
+import io
 import logging
 import math
+import zipfile
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, TypeVar
 
@@ -788,6 +790,34 @@ class GarminClient:
 
     def upload_workout(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._call(self._garmin.upload_workout, payload)
+
+    def get_activities_by_date(self, start: date, end: date) -> list[dict[str, Any]]:
+        """Activités brutes Garmin entre deux dates (incluses)."""
+        raw = self._call(self._garmin.get_activities_by_date, start.isoformat(), end.isoformat())
+        return [a for a in raw if isinstance(a, dict)] if isinstance(raw, list) else []
+
+    def upload_activity_file(self, path: str) -> Any:
+        """Importe un fichier d'activité (.fit) dans Garmin Connect. Un doublon exact déjà
+        présent chez Garmin remonte en erreur HTTP 409, laissée à l'appelant (c'est aussi ce
+        qui rend la nouvelle tentative de `_call` sans risque de double import)."""
+        return self._call(self._garmin.upload_activity, path)
+
+    def download_activity_fit(self, activity_id: int | str) -> bytes:
+        """Fichier FIT original d'une activité (Garmin le livre dans un zip)."""
+        raw = self._call(
+            self._garmin.download_activity, str(activity_id), dl_fmt=Garmin.ActivityDownloadFormat.ORIGINAL
+        )
+        if raw[:2] != b"PK":
+            return raw
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            names = [n for n in zf.namelist() if n.lower().endswith(".fit")]
+            if not names:
+                raise GarminUnavailableError("archive Garmin sans fichier .fit", error_type="unknown")
+            return zf.read(names[0])
+
+    def delete_activity(self, activity_id: int | str) -> Any:
+        """Supprime définitivement une activité réalisée (irréversible côté Garmin)."""
+        return self._call(self._garmin.delete_activity, str(activity_id))
 
     def schedule_workout(self, workout_id: int | str, date_str: str) -> dict[str, Any]:
         return self._call(self._garmin.schedule_workout, workout_id, date_str)
