@@ -4,6 +4,27 @@ Toutes les évolutions sont **additives** : aucune clé de réponse existante n'
 retirée (vérifié par `tests/test_non_regression.py`, schémas figés le 17/10/2026), sauf
 l'exception signalée au 17/10/2026 (matin) pour `garmin_get_training_status`.
 
+## 2026-11-18 — Import MyWhoosh vers Garmin (`mywhoosh_sync`, `mywhoosh_merge_hr`)
+
+### Ajouté
+- `mywhoosh_sync` : importe les dernières sorties MyWhoosh dans Garmin Connect, réécrites
+  en Edge 840 ; saute une sortie déjà couverte par une activité Garmin qui la chevauche dans
+  le temps (`force`, `dry_run`).
+- `mywhoosh_merge_hr` : fusionne une séance enregistrée en double (FC de la montre injectée
+  dans le FIT MyWhoosh), suppression de l'activité montre seulement avec
+  `delete_original=true`.
+- Variables optionnelles `MYWHOOSH_EMAIL` / `MYWHOOSH_PASSWORD` ; identifiant d'appareil
+  MyWhoosh stable dans `data/mywhoosh_device_id`.
+- `GarminClient` : `get_activities_by_date`, `upload_activity_file`,
+  `download_activity_fit`, `delete_activity`. Aucun tool existant modifié.
+
+### Vérifié sur les comptes réels
+- 17/11 : sortie « Tour de Corse » importée (16,04 km, NP 191 W ; ni charge ni effet
+  d'entraînement, faute de FC).
+- 18/11 : Ramp Test fusionné avec l'activité montre (FC sur 1689/1806 s, NP 177 W, charge
+  34,4), activité montre supprimée ensuite. Déployé sur la VM, appareil validé, `dry_run`
+  OK sur l'endpoint public.
+
 ## 2026-11-11 — Séances de natation sur la montre (`garmin_push_workout`)
 
 ### Ajouté

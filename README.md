@@ -56,9 +56,12 @@ mcp-garmin-coach/
 │   ├── auth.py                   # segment secret dans l'URL, protection DNS-rebinding
 │   ├── garmin_client.py          # wrapper autour de garminconnect (login, cache session, parsing)
 │   ├── workout_builder.py        # construction de payloads de séances structurées (course/vélo/natation)
+│   ├── mywhoosh_client.py        # client MyWhoosh (API interne de l'app mobile : login, sorties, FIT)
+│   ├── fit_device.py             # lecture/patch de fichiers FIT sans dépendance (Edge 840, injection FC)
 │   ├── db.py                     # connexion SQLite, création des tables au démarrage
 │   ├── tools/
 │   │   ├── garmin_tools.py       # tools garmin_*
+│   │   ├── mywhoosh_tools.py     # tools mywhoosh_* (import home trainer vers Garmin)
 │   │   └── operational_tools.py  # plan de semaine, séances, feedback
 │   └── models.py                 # modèles pydantic, utilitaires de fuseau horaire
 ├── tests/
@@ -77,6 +80,8 @@ cp .env.example .env
 |---|---|
 | `GARMIN_EMAIL` | Email du compte Garmin Connect |
 | `GARMIN_PASSWORD` | Mot de passe du compte Garmin Connect |
+| `MYWHOOSH_EMAIL` | Optionnel : e-mail du compte MyWhoosh (tools `mywhoosh_*`). Sans lui, ces tools répondent « non configuré » |
+| `MYWHOOSH_PASSWORD` | Optionnel : mot de passe du compte MyWhoosh |
 | `MCP_SECRET_PATH` | Segment secret du chemin de montage (`/mcp/<secret>`) — générer avec la commande ci-dessous |
 | `DB_PATH` | Chemin du fichier SQLite (défaut `./data/coach.db`) |
 | `LOG_LEVEL` | Niveau de log (défaut `INFO`) |
@@ -246,8 +251,9 @@ permanent change, sa clé est versionnée (ex. `activity_weather_v2`).
 
 ## Tools MCP exposés
 
-29 tools au total. La description détaillée de chaque tool (entrées, sorties, unités, états
-d'erreur) est sa docstring dans `src/tools/garmin_tools.py` / `src/tools/operational_tools.py` :
+31 tools au total. La description détaillée de chaque tool (entrées, sorties, unités, états
+d'erreur) est sa docstring dans `src/tools/garmin_tools.py` / `src/tools/mywhoosh_tools.py` /
+`src/tools/operational_tools.py` :
 c'est elle que le client MCP reçoit comme description du tool.
 
 ### Conventions communes (tools `garmin_*`)
@@ -312,6 +318,23 @@ c'est elle que le client MCP reçoit comme description du tool.
 | `garmin_push_workout` | Construit et programme une séance structurée (course/vélo/natation en piscine) sur la montre. Natation (`discipline: "nage"`) : longueur de bassin, nage, matériel, éducatifs, intensité, allure min/100m, repos fixe ou au bouton Lap. `dry_run=True` par défaut — ne fait jamais d'appel d'écriture réel sans `dry_run=False` explicite. Anti-doublon + retry à la programmation |
 | `garmin_list_workouts` | Liste les séances programmées sur le calendrier (créées via `garmin_push_workout`), avec `workout_id`/`name`/`date`/`discipline`. Filtres `start_date`/`end_date` optionnels (sans filtre : fenêtre J-30/J+60) |
 | `garmin_delete_workout` | Supprime un workout (nettoyage, ex. séance de test) — supprime le *template*, pas seulement son occurrence de calendrier (cf. "Écarts volontaires" ci-dessous) |
+
+### MyWhoosh — home trainer vers Garmin (écriture)
+
+MyWhoosh n'a pas de synchro Garmin Connect officielle (Garmin n'accepte plus de nouvelles
+intégrations tierces). Ces tools téléchargent le FIT de la sortie via l'API interne de l'app
+MyWhoosh et l'importent dans Garmin, en le présentant comme enregistré par un **Edge 840**
+(fabricant/produit de l'appareil créateur réécrits, home trainer et capteurs intacts) pour que
+Garmin le compte dans la charge et le statut d'entraînement.
+
+| Tool | Rôle |
+|---|---|
+| `mywhoosh_sync` | Importe les `count` dernières sorties MyWhoosh (1 à 10). Une sortie déjà couverte par une activité Garmin qui la **chevauche dans le temps** (± 5 min, sans tenir compte du nom) est sautée : `deja_present`, sauf `force=true`. `dry_run=true` ne fait que lister. Statut par sortie : `importe` (+ `activity_id`), `deja_present`, `a_importer`, `erreur` |
+| `mywhoosh_merge_hr` | **Séance enregistrée en double** (« Vélo d'intérieur » sur la montre + MyWhoosh) : injecte la FC de l'activité montre `garmin_activity_id` dans le FIT MyWhoosh qui la chevauche (FC par seconde à ± 5 s, FC moy/max des tours et de la session ; les 0 bpm écrits par MyWhoosh sans capteur deviennent « pas de valeur »), puis importe une seule activité avec puissance **et** FC. `delete_original=true` supprime ensuite **définitivement** l'activité montre — sinon la séance compte deux fois dans la charge ; à ne passer qu'après accord explicite |
+
+Usage recommandé : lancer « Vélo d'intérieur » sur la montre en même temps que MyWhoosh, puis
+`mywhoosh_merge_hr`. Sans la montre, `mywhoosh_sync` (pas de FC : Garmin ne calcule alors ni
+charge ni effet d'entraînement).
 
 ### Opérationnel (plan de semaine, séances, feedback)
 
@@ -498,6 +521,22 @@ préavis. Après un `garmin_sync` en conditions réelles, il est recommandé d'i
 de `garmin_cache` (table SQLite) pour confirmer que les champs sont bien peuplés, et d'ajuster le
 parsing si nécessaire.
 
+**MyWhoosh** n'a pas d'API publique : `src/mywhoosh_client.py` reprend les trois appels de
+l'app mobile (login, liste des sorties, lien de téléchargement du FIT), relevés dans le projet
+communautaire `marcelorodrigo/mywhoosh-to-garmin`. Ils peuvent changer sans préavis et les
+conditions d'utilisation de MyWhoosh n'autorisent probablement pas cet usage. Points connus :
+
+- **Validation d'appareil** : MyWhoosh exige de valider chaque nouvel appareil (réponse
+  `LoginType` 6, « Device trust verification required »), par un lien reçu par e-mail.
+  L'identifiant d'appareil est donc stable, stocké dans `data/mywhoosh_device_id` (créé au
+  premier appel, ignoré par git) ; le tool renvoie une erreur `auth` explicite avec cet
+  identifiant tant que le lien n'est pas validé. Chaque machine (poste local, VM) a son propre
+  fichier, donc sa propre validation ; supprimer le fichier en redemande une.
+- **Import différé** : Garmin ne renvoie souvent pas encore l'id de l'activité importée ; il
+  est retrouvé par chevauchement horaire (jusqu'à 4 essais espacés de 3 s), sinon `null`.
+- **Doublon exact** : Garmin répond HTTP 409 à un fichier déjà importé, remonté en
+  `deja_present`.
+
 ## Déploiement production
 
 Le serveur tourne en systemd sur une VM Oracle Cloud, derrière Caddy (reverse proxy HTTPS).
@@ -530,6 +569,7 @@ rester réutilisables si l'hébergement change.
 | Service systemd | `coach-mcp.service` (`sudo systemctl {start,stop,restart,status} coach-mcp`) |
 | `.env` réel | `/home/ubuntu/Mon-Coach-IA/.env` |
 | Domaine public | `coach-ia.duckdns.org`, HTTPS géré par Caddy |
+| Appareil MyWhoosh | `/home/ubuntu/Mon-Coach-IA/data/mywhoosh_device_id` (validé le 18/11/2026) |
 
 `deploy/coach-mcp.service` local reflète ces chemins réels une fois adapté sur la VM — le fichier
 qui compte est `/etc/systemd/system/coach-mcp.service` sur la VM elle-même, pas le template du
