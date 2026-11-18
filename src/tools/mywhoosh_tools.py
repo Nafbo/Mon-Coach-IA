@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from src.fit_device import FitFormatError, _parse, heart_rate_series, inject_heart_rate, rewrite_as_edge_840, summarize
+from src.fit_device import FitFormatError, _parse, best_mean_power, heart_rate_series, power_series, inject_heart_rate, rewrite_as_edge_840, summarize
 from src.garmin_client import ACTIVITY_TYPE_MAP, GarminClient
 from src.models import PARIS_TZ
 from src.mywhoosh_client import MyWhooshClient, MyWhooshError
@@ -31,6 +31,9 @@ _OVERLAP_MARGIN = timedelta(minutes=5)
 _MAX_COUNT = 10
 # Sorties MyWhoosh téléchargées au plus pour trouver celle qui chevauche l'activité montre.
 _MERGE_SCAN = 5
+# Ramp Test : FTP = 75 % de la meilleure minute (protocole standard, repris par MyWhoosh).
+_RAMP_TEST = "ramp test"
+_RAMP_FTP_RATIO = 0.75
 # Garmin met quelques secondes à traiter un import avant de le lister.
 _ID_LOOKUP_ATTEMPTS = 4
 _ID_LOOKUP_DELAY_S = 3
@@ -302,7 +305,52 @@ def build_mywhoosh_tools(
             return _error(f"MyWhoosh : {exc}", exc.error_type)
         return {"status": "created", "seance": preview, "dossier": "MyWorkout (app MyWhoosh)"}
 
+    async def mywhoosh_get_ftp(scan: int = 10) -> dict[str, Any]:
+        """FTP vélo recalculée depuis le dernier Ramp Test MyWhoosh. MyWhoosh n'expose pas la
+        FTP réglée dans l'app (aucun appel accessible) : on applique la règle du Ramp Test,
+        FTP = 75 % de la meilleure minute de puissance, sur le FIT de la sortie. Écart
+        constaté avec la valeur de l'app : quelques watts (208 calculés pour 206 affichés le
+        18/11/2026). Ne voit ni une FTP modifiée à la main dans l'app, ni un autre type de
+        test. `scan` : nombre de sorties récentes parcourues (1 à 10). Sortie : `status`
+        "ok" (+ `ftp_watts`, `meilleure_minute_w`, `test` {nom, date}, `methode`) |
+        "no_data" (aucun Ramp Test parmi les sorties parcourues) | "error"."""
+        if mywhoosh is None:
+            return _error(
+                "MyWhoosh non configuré : renseigner MYWHOOSH_EMAIL et MYWHOOSH_PASSWORD dans le .env",
+                "auth",
+            )
+        if not 1 <= scan <= _MAX_COUNT:
+            return _error(f"scan doit être entre 1 et {_MAX_COUNT}")
+        try:
+            rides = mywhoosh.list_activities(limit=scan)
+        except MyWhooshError as exc:
+            return _error(f"MyWhoosh : {exc}", exc.error_type)
+        test = next((r for r in rides if _RAMP_TEST in (_ride_label(r) or "").lower()), None)
+        if test is None:
+            return {"status": "no_data", "message": f"aucun Ramp Test parmi les {len(rides)} dernières sorties"}
+        try:
+            fit = mywhoosh.download_fit(test)
+            best = best_mean_power(power_series(fit), 60)
+            start = summarize(fit).start_utc
+        except MyWhooshError as exc:
+            return _error(f"MyWhoosh : {exc}", exc.error_type)
+        except FitFormatError as exc:
+            return _error(f"FIT du Ramp Test illisible : {exc}", "unknown")
+        if not best:
+            return {"status": "no_data", "message": "pas de puissance exploitable dans le FIT du Ramp Test"}
+        return {
+            "status": "ok",
+            "ftp_watts": round(best * _RAMP_FTP_RATIO),
+            "meilleure_minute_w": round(best),
+            "test": {
+                "nom": _ride_label(test),
+                "date": start.astimezone(PARIS_TZ).date().isoformat() if start else None,
+            },
+            "methode": "75 % de la meilleure minute du Ramp Test (estimation, ± quelques W vs l'app)",
+        }
+
     return {
+        "mywhoosh_get_ftp": mywhoosh_get_ftp,
         "mywhoosh_sync": mywhoosh_sync,
         "mywhoosh_merge_hr": mywhoosh_merge_hr,
         "mywhoosh_push_workout": mywhoosh_push_workout,

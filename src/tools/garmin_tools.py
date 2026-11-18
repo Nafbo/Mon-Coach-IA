@@ -357,7 +357,11 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
 
     async def garmin_get_lactate_threshold(force_refresh: bool = False) -> dict[str, Any]:
         """Seuil lactique : course (FC, allure min/km, puissance) et FTP vélo. `status` :
-        "ok" | "no_data" | erreur."""
+        "ok" | "no_data" | erreur. `cycling` : `ftp_watts` (FTP vélo la plus récente enregistrée
+        dans Garmin Connect), `ftp_date` (AAAA-MM-JJ), `ftp_source` (origine brute Garmin :
+        saisie manuelle, détection automatique…) et son propre `status` : "ok", "no_data"
+        (aucune FTP vélo chez Garmin — rien n'est estimé) ou "error" (+ `error {type,
+        message}`, échec d'accès sur ce seul champ, le seuil course reste valable)."""
         today = today_paris()
         result = _fetch_cached(
             "lactate_threshold", today.isoformat(), client.get_lactate_threshold, force_refresh=force_refresh

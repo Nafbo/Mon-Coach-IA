@@ -83,6 +83,7 @@ def healthy_client(tmp_path) -> GarminClient:
         }
     ]
     g.get_lactate_threshold.return_value = {"speed_and_heart_rate": {"heartRate": 174, "speed": 0.383}, "power": {}}
+    g.get_cycling_ftp.return_value = {"functionalThresholdPower": None, "calendarDate": None}
     g.get_weekly_intensity_minutes.return_value = [{"moderateValue": 50, "vigorousValue": 20, "weeklyGoal": 150}]
     g.get_activity_weather.return_value = {
         "temp": 64,

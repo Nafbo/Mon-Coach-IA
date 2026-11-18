@@ -252,7 +252,7 @@ permanent change, sa clé est versionnée (ex. `activity_weather_v2`).
 
 ## Tools MCP exposés
 
-32 tools au total. La description détaillée de chaque tool (entrées, sorties, unités, états
+33 tools au total. La description détaillée de chaque tool (entrées, sorties, unités, états
 d'erreur) est sa docstring dans `src/tools/garmin_tools.py` / `src/tools/mywhoosh_tools.py` /
 `src/tools/operational_tools.py` :
 c'est elle que le client MCP reçoit comme description du tool.
@@ -298,7 +298,7 @@ c'est elle que le client MCP reçoit comme description du tool.
 | `garmin_get_recent_activities` | Activités récentes normalisées (`course`/`velo`/`nage`/`renfo`) ; vélo : `vitesse_moyenne_kmh`, `vitesse_max_kmh` ; `last_sync` ; `force_refresh=true` relit Garmin sans cache |
 | `garmin_get_training_load` | Charge aiguë/chronique détaillée, ratio, statut, cibles ACWR |
 | `garmin_get_training_load_balance` | Répartition mensuelle de charge (aérobie faible/élevée/anaérobique) |
-| `garmin_get_lactate_threshold` | Seuil lactique course (FC + allure) et FTP vélo |
+| `garmin_get_lactate_threshold` | Seuil lactique course (FC + allure + puissance) et FTP vélo : `cycling.ftp_watts`, `ftp_date`, `ftp_source` et `cycling.status` (`ok` / `no_data` = aucune FTP vélo chez Garmin / `error`). La FTP vient de `latestFunctionalThresholdPower/CYCLING` : `get_lactate_threshold` de garminconnect ne renvoie que la puissance course |
 | `garmin_get_intensity_minutes` | Minutes d'intensité modérée/vigoureuse vs objectif hebdo |
 
 ### Garmin — activité individuelle (cache sans expiration)
@@ -333,6 +333,7 @@ Garmin le compte dans la charge et le statut d'entraînement.
 | `mywhoosh_sync` | Importe les `count` dernières sorties MyWhoosh (1 à 10). Une sortie déjà couverte par une activité Garmin qui la **chevauche dans le temps** (± 5 min, sans tenir compte du nom) est sautée : `deja_present`, sauf `force=true`. `dry_run=true` ne fait que lister. Statut par sortie : `importe` (+ `activity_id`), `deja_present`, `a_importer`, `erreur` |
 | `mywhoosh_merge_hr` | **Séance enregistrée en double** (« Vélo d'intérieur » sur la montre + MyWhoosh) : injecte la FC de l'activité montre `garmin_activity_id` dans le FIT MyWhoosh qui la chevauche (FC par seconde à ± 5 s, FC moy/max des tours et de la session ; les 0 bpm écrits par MyWhoosh sans capteur deviennent « pas de valeur »), puis importe une seule activité avec puissance **et** FC. `delete_original=true` supprime ensuite **définitivement** l'activité montre — sinon la séance compte deux fois dans la charge ; à ne passer qu'après accord explicite |
 
+| `mywhoosh_get_ftp` | FTP vélo **recalculée** depuis le dernier Ramp Test MyWhoosh (parmi les `scan` dernières sorties) : 75 % de la meilleure minute de puissance du FIT. Estimation à quelques watts près de la valeur de l'app (208 W calculés pour 206 W affichés le 18/11/2026) ; ne voit pas une FTP modifiée à la main dans l'app. `no_data` sans Ramp Test récent |
 | `mywhoosh_push_workout` | Crée une séance vélo dans le dossier **« MyWorkout »** de l'app MyWhoosh (même appel que le bouton d'export du Workout Builder, `coaching.mywhoosh.com`, même jeton que l'app). Blocs `warmup`/`cooldown`/`ramp` (`start_pct`→`end_pct`), `steady` (`power_pct`), `intervals` (`repeat`, `on_s`/`on_pct`, `off_s`/`off_pct`), `free` ; `cadence`, `off_cadence`, `message`/`messages` optionnels. Intensités en **% de FTP** (la séance suit la FTP réglée dans MyWhoosh), IF et TSS estimés. `dry_run=True` par défaut ; une séance du même nom déjà présente n'est pas recréée (`already_present`) |
 
 Usage recommandé : lancer « Vélo d'intérieur » sur la montre en même temps que MyWhoosh, puis
@@ -539,6 +540,12 @@ conditions d'utilisation de MyWhoosh n'autorisent probablement pas cet usage. Po
   est retrouvé par chevauchement horaire (jusqu'à 4 essais espacés de 3 s), sinon `null`.
 - **Doublon exact** : Garmin répond HTTP 409 à un fichier déjà importé, remonté en
   `deja_present`.
+- **FTP** : aucun appel accessible avec le jeton de l'app ne renvoie la FTP réglée dans
+  MyWhoosh (vérifié le 18/11/2026 : réponse de connexion, liste et FIT des sorties, API du
+  Workout Builder). Le tableau de bord web l'affiche, mais sa connexion est protégée par
+  reCAPTCHA : pas de lecture automatique. `mywhoosh_get_ftp` la recalcule depuis le dernier
+  Ramp Test à la place. Côté Garmin, ni garminconnect 0.3.2 ni 0.3.9
+  n'exposent d'écriture de FTP : elle se saisit dans Garmin Connect.
 - **Séances (`mywhoosh_push_workout`)** : format JSON et appel relevés dans le code du Workout
   Builder (`workout.mywhoosh.com`, export JSON et bouton d'enregistrement) le 18/11/2026 ;
   puissance en fraction de FTP (0.75 = 75 %), répétitions aplaties en étapes partageant un

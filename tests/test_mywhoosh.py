@@ -376,3 +376,37 @@ def test_user_id_read_from_jwt() -> None:
     client = MyWhooshClient("a@b.c", "pw", device_id="d")
     client._token = f"h.{payload}.s"
     assert client._user_id() == "u-1"
+
+
+# -- FTP depuis le Ramp Test -----------------------------------------------------------
+
+
+def test_power_series_and_best_minute() -> None:
+    series = fd.power_series(make_ride_fit(seconds=120))  # 150, 151, … 269 W
+    assert len(series) == 120 and series[0] == 150 and series[-1] == 269
+    assert fd.best_mean_power(series, 60) == pytest.approx(239.5)
+    assert fd.best_mean_power(series[:30], 60) is None
+    # Trou court comblé, trou long compté à 0 W.
+    assert fd.best_mean_power([300] * 10 + [0] * 50, 60) == 50
+
+
+async def test_get_ftp_from_latest_ramp_test(garmin: MagicMock, mywhoosh: MagicMock) -> None:
+    mywhoosh.list_activities.return_value = [
+        {"title": "MyWhoosh - Tour de Corse", "activityFileId": "a"},
+        {"title": "MyWhoosh - Ramp Test - MyWhoosh", "activityFileId": "b"},
+    ]
+    mywhoosh.download_fit.return_value = make_ride_fit(seconds=120)
+
+    result = await build_mywhoosh_tools(garmin, mywhoosh)["mywhoosh_get_ftp"]()
+
+    assert result["status"] == "ok"
+    assert result["meilleure_minute_w"] == 240 and result["ftp_watts"] == 180
+    assert result["test"] == {"nom": "MyWhoosh - Ramp Test - MyWhoosh", "date": "2026-11-17"}
+    mywhoosh.download_fit.assert_called_once_with(mywhoosh.list_activities.return_value[1])
+
+
+async def test_get_ftp_without_ramp_test_is_no_data(garmin: MagicMock, mywhoosh: MagicMock) -> None:
+    mywhoosh.list_activities.return_value = [{"title": "MyWhoosh - Tour de Corse"}]
+    result = await build_mywhoosh_tools(garmin, mywhoosh)["mywhoosh_get_ftp"]()
+    assert result["status"] == "no_data"
+    mywhoosh.download_fit.assert_not_called()

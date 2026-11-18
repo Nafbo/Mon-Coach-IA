@@ -706,14 +706,60 @@ def test_get_training_load_balance_missing_data(client: GarminClient) -> None:
 
 def test_get_lactate_threshold_handles_missing_values(client: GarminClient) -> None:
     client._garmin.get_lactate_threshold.return_value = {}
+    client._garmin.get_cycling_ftp.return_value = {}
 
     result = client.get_lactate_threshold()
 
     assert result == {
         "status": "no_data",
         "running": {"heart_rate": None, "pace_min_per_km": None, "pace_mmss": None, "power_watts": None, "power_watts_per_kg": None},
-        "cycling": {"ftp_watts": None},
+        "cycling": {"ftp_watts": None, "ftp_date": None, "ftp_source": None, "status": "no_data"},
     }
+
+
+# Forme réelle de latestFunctionalThresholdPower/CYCLING sans FTP (compte réel, 18/11/2026).
+_NO_CYCLING_FTP = {
+    "userProfilePK": 1, "version": None, "calendarDate": None, "isStale": None,
+    "sequence": None, "sport": None, "functionalThresholdPower": None, "biometricSourceType": None,
+}
+
+
+def test_cycling_ftp_absent_in_garmin_is_no_data_not_error(client: GarminClient) -> None:
+    client._garmin.get_lactate_threshold.return_value = {"speed_and_heart_rate": {"heartRate": 174, "speed": 0.383}, "power": {}}
+    client._garmin.get_cycling_ftp.return_value = _NO_CYCLING_FTP
+
+    result = client.get_lactate_threshold()
+
+    assert result["status"] == "ok"  # le seuil course suffit
+    assert result["cycling"] == {"ftp_watts": None, "ftp_date": None, "ftp_source": None, "status": "no_data"}
+
+
+def test_cycling_ftp_read_from_dedicated_endpoint(client: GarminClient) -> None:
+    # Le "power" de get_lactate_threshold est toujours la course : la FTP vélo vient d'ailleurs.
+    client._garmin.get_lactate_threshold.return_value = {
+        "speed_and_heart_rate": {"heartRate": 174, "speed": 0.383},
+        "power": {"sport": "RUNNING", "functionalThresholdPower": 459, "powerToWeight": 5.34},
+    }
+    client._garmin.get_cycling_ftp.return_value = {
+        **_NO_CYCLING_FTP, "calendarDate": "2026-11-18T21:00:00.0", "sport": "CYCLING",
+        "functionalThresholdPower": 206, "biometricSourceType": "MANUAL",
+    }
+
+    result = client.get_lactate_threshold()
+
+    assert result["running"]["power_watts"] == 459
+    assert result["cycling"] == {"ftp_watts": 206, "ftp_date": "2026-11-18", "ftp_source": "MANUAL", "status": "ok"}
+
+
+def test_cycling_ftp_access_error_keeps_running_threshold(client: GarminClient) -> None:
+    client._garmin.get_lactate_threshold.return_value = {"speed_and_heart_rate": {"heartRate": 174, "speed": 0.383}, "power": {}}
+    client._garmin.get_cycling_ftp.side_effect = GarminConnectConnectionError("API Error 500 - boom")
+
+    result = client.get_lactate_threshold()
+
+    assert result["status"] == "ok" and result["running"]["heart_rate"] == 174
+    assert result["cycling"]["status"] == "error" and result["cycling"]["error"]["type"] == "network"
+    assert result["cycling"]["ftp_watts"] is None
 
 
 def test_get_lactate_threshold_parses_real_running_shape(client: GarminClient) -> None:

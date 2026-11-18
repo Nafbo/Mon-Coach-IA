@@ -234,7 +234,10 @@
  "garmin_get_lactate_threshold": {
   "nested": {
    "cycling": [
-    "ftp_watts"
+    "ftp_date",
+    "ftp_source",
+    "ftp_watts",
+    "status"
    ],
    "running": [
     "heart_rate",

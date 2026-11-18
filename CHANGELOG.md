@@ -4,6 +4,27 @@ Toutes les évolutions sont **additives** : aucune clé de réponse existante n'
 retirée (vérifié par `tests/test_non_regression.py`, schémas figés le 17/10/2026), sauf
 l'exception signalée au 17/10/2026 (matin) pour `garmin_get_training_status`.
 
+## 2026-11-18 (nuit) — FTP vélo dans `garmin_get_lactate_threshold`
+
+### Corrigé
+- `cycling.ftp_watts` restait toujours `null` : `get_lactate_threshold` de garminconnect
+  n'interroge que `powerToWeight?sport=Running` (puissance course). La FTP vélo est
+  maintenant lue sur `latestFunctionalThresholdPower/CYCLING` (`get_cycling_ftp`).
+
+### Ajouté (additif, mêmes clés existantes)
+- `cycling.ftp_date`, `cycling.ftp_source`, `cycling.status` (`ok` / `no_data` / `error`,
+  + `cycling.error` en cas d'échec de ce seul appel), aussi dans
+  `garmin_get_daily_snapshot.lactate_threshold`.
+
+- `mywhoosh_get_ftp` : FTP recalculée depuis le dernier Ramp Test MyWhoosh (75 % de la
+  meilleure minute du FIT) ; sur le compte réel, 208 W pour 206 W affichés dans l'app.
+
+### Constaté sur le compte réel
+- Aucune FTP vélo chez Garmin (endpoint aux champs tous `null`, historique vide sur deux
+  ans) : `cycling.status` = `no_data`.
+- Pas d'outil d'écriture de FTP (aucun endpoint exposé par garminconnect) ; pas de lecture
+  de la FTP MyWhoosh (aucun appel accessible, cf. README « Limites connues »).
+
 ## 2026-11-18 (soir) — Séances home trainer vers MyWhoosh (`mywhoosh_push_workout`)
 
 ### Ajouté

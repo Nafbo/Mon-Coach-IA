@@ -351,3 +351,45 @@ def inject_heart_rate(data: bytes, series: dict[int, int]) -> tuple[bytes, int]:
         struct.pack_into("<H", out, 12, fit_crc(bytes(out[:12])))
     out += struct.pack("<H", fit_crc(bytes(out)))
     return bytes(out), filled
+
+
+# -- puissance ------------------------------------------------------------------------
+
+_RECORD_POWER = 7
+_MAX_GAP_FILL_S = 5  # trou plus long : compté à 0 W (pause, capteur décroché)
+
+
+def power_series(data: bytes) -> list[int]:
+    """Puissance seconde par seconde (W), des `record` du FIT. Les trous courts (≤ 5 s,
+    enregistrement espacé) reprennent la dernière valeur ; au-delà, 0 W."""
+    _, _, messages = _parse(data)
+    points: dict[int, int] = {}
+    for m in messages:
+        if m.global_num == _MSG_RECORD and m.timestamp is not None:
+            power = _read_uint(data, m.fields.get(_RECORD_POWER))
+            if power is not None:
+                points[m.timestamp] = power
+    if not points:
+        return []
+    start, end = min(points), max(points)
+    series: list[int] = []
+    last, last_ts = 0, start
+    for ts in range(start, end + 1):
+        if ts in points:
+            last, last_ts = points[ts], ts
+            series.append(last)
+        else:
+            series.append(last if ts - last_ts <= _MAX_GAP_FILL_S else 0)
+    return series
+
+
+def best_mean_power(series: list[int], window_s: int) -> float | None:
+    """Meilleure puissance moyenne sur `window_s` secondes consécutives."""
+    if window_s <= 0 or len(series) < window_s:
+        return None
+    current = sum(series[:window_s])
+    best = current
+    for i in range(window_s, len(series)):
+        current += series[i] - series[i - window_s]
+        best = max(best, current)
+    return best / window_s

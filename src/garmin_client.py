@@ -550,7 +550,11 @@ class GarminClient:
         elif sport == "CYCLING":
             cycling_ftp = _to_int(power_data.get("functionalThresholdPower"), default=None)
 
-        has_data = any(v is not None for v in (hr, pace_min_per_km, running_power, cycling_ftp))
+        cycling = self._cycling_ftp()
+        if cycling["ftp_watts"] is None and cycling_ftp is not None:  # repli, jamais observé en réel
+            cycling = {**cycling, "ftp_watts": cycling_ftp, "status": "ok"}
+
+        has_data = any(v is not None for v in (hr, pace_min_per_km, running_power, cycling["ftp_watts"]))
         return {
             "status": "ok" if has_data else "no_data",
             "running": {
@@ -560,9 +564,34 @@ class GarminClient:
                 "power_watts": running_power,
                 "power_watts_per_kg": running_power_per_kg,
             },
-            "cycling": {
-                "ftp_watts": cycling_ftp,
-            },
+            "cycling": cycling,
+        }
+
+    def _cycling_ftp(self) -> dict[str, Any]:
+        """FTP vélo la plus récente (`/biometric-service/biometric/latestFunctionalThresholdPower/
+        CYCLING`, `get_cycling_ftp`). `get_lactate_threshold` de garminconnect ne la renvoie
+        jamais : il interroge `powerToWeight?sport=Running`, donc seule la puissance course
+        remonte. Sans FTP saisie ni détectée, Garmin renvoie un objet aux champs tous `null`
+        (constaté sur le compte réel le 18/11/2026) → `status` "no_data". Un échec d'accès sur
+        ce seul appel donne `status` "error" sans faire échouer le seuil course."""
+        empty = {"ftp_watts": None, "ftp_date": None, "ftp_source": None}
+        try:
+            raw = self._call(self._garmin.get_cycling_ftp)
+        except (GarminAuthenticationError, GarminUnavailableError) as exc:
+            return {**empty, "status": "error", "error": {"type": classify_error(exc), "message": str(exc)}}
+        entry = raw[0] if isinstance(raw, list) and raw and isinstance(raw[0], dict) else raw
+        if not isinstance(entry, dict):
+            return {**empty, "status": "no_data"}
+        ftp = _to_int(entry.get("functionalThresholdPower"), default=None)
+        if not ftp:
+            return {**empty, "status": "no_data"}
+        date_raw = entry.get("calendarDate")
+        return {
+            "ftp_watts": ftp,
+            "ftp_date": str(date_raw).split("T")[0].split(" ")[0] if date_raw else None,
+            # Valeur brute Garmin (ex. saisie manuelle ou détection automatique par l'appareil).
+            "ftp_source": entry.get("biometricSourceType"),
+            "status": "ok",
         }
 
     def get_activity_summary(self, activity_id: str | int) -> dict[str, Any]:
