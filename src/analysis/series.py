@@ -644,8 +644,14 @@ def analyse(
     summary: dict[str, Any] | None = None,
     pause_merge_s: float | None = None,
     vitesse_cible_kmh: float | None = None,
+    ftp_w: float | None = None,
+    puissance_cible_w: float | None = None,
 ) -> dict[str, Any]:
     """Analyse complète d'une activité ; renvoie un dict JSON compact.
+
+    Vélo avec série `power_w` : blocs détectés sur la puissance, découplage Pw:FC, champs de
+    puissance ajoutés (cf. `src/analysis/power.py`) ; `ftp_w` et `puissance_cible_w`
+    optionnels. Sans puissance : sortie strictement identique à l'analyse historique.
 
     `sport` ("course" | "velo" | ...) choisit l'expression des résultats : km/h, distance
     officielle et découplage à travers les pauses courtes pour le vélo ; comportement
@@ -671,13 +677,23 @@ def analyse(
     avg_pace = moving / 60 / dist if dist else None
 
     segs = continuous_segments(t)
-    blocks, type_info = _detect_blocks(t, hr, pace_smooth, valid_paces, fast, slow, segs, type, velo)
+    pw, cad = _aligned(details, "power_w"), _aligned(details, "cadence_rpm")
+    from src.analysis import power as pwr  # import local : power.py importe ce module
+
+    with_power = velo and pwr.has_power(pw)
+    if with_power:
+        blocks, type_info = pwr.detect_power_blocks(t, hr, pw, segs, type)
+    else:
+        blocks, type_info = _detect_blocks(t, hr, pace_smooth, valid_paces, fast, slow, segs, type, velo)
 
     block_list = []
     for n, (i, j) in enumerate(blocks, 1):
         s = {"n": n, **block_stats(t, hr, pa, el, i, j, di if has_distance else None)}
         if velo:
-            block_list.append(_velo_block(s, vitesse_cible_kmh))
+            block = _velo_block(s, vitesse_cible_kmh)
+            if with_power:
+                block.update(pwr.block_power(t, pw, cad, i, j, ftp_w, puissance_cible_w))
+            block_list.append(block)
             continue
         if allure_cible and s["allure"]:
             ecart = (s["allure"] - allure_cible) * 60
@@ -685,7 +701,10 @@ def analyse(
             s["verdict"] = _verdict(ecart)
         block_list.append(s)
 
-    if velo:
+    decoupling_reason = None
+    if with_power:
+        decoupling, decoupling_reason = pwr.power_decoupling(t, hr, pw, blocks, segs, pause_merge_s)
+    elif velo:
         decoupling = _decoupling_velo(t, hr, pa, el, blocks, segs, pause_merge_s)
     else:
         decoupling = _decoupling(t, hr, pa, blocks, segs, pause_merge_s, velo)
@@ -756,6 +775,28 @@ def analyse(
         if pause_merge_s is not None:
             parametres["pause_merge_s"] = pause_merge_s
 
+    extra: dict[str, Any] = {}
+    if with_power:
+        sec = pwr.per_second(t, pw)
+        vue.update(pwr.overview(sec, t, cad, ftp_w))
+        vue["fc_disponible"] = bool(hrs)
+        if not hrs:
+            vue["message_fc"] = (
+                "FC absente (aucune valeur, ou 0 renvoyé par Garmin) : analyse en puissance seule, "
+                "sans zones FC ni découplage"
+            )
+        vue["vitesse_virtuelle_possible"] = (
+            "sur home trainer, vitesse et distance sont virtuelles : l'intensité se lit en puissance"
+        )
+        parametres["ftp_w"] = ftp_w
+        parametres["puissance_cible_w"] = puissance_cible_w
+        extra = {
+            "puissance_disponible": True,
+            "zones_puissance": pwr.power_zones(sec, ftp_w) if ftp_w else None,
+            "meilleurs_efforts_w": pwr.best_efforts(sec),
+            "derive_cardiaque_raison": decoupling_reason,
+        }
+
     return {
         "status": "ok",
         "sport": sport,
@@ -772,7 +813,19 @@ def analyse(
         "blocs": block_list,
         "recuperations": _recoveries(t, hr, blocks),
         "derive_cardiaque": decoupling,
+        **extra,
     }
+
+
+def _aligned(details: dict[str, Any], key: str) -> list:
+    """Série optionnelle alignée sur les points gardés par `load_series` (temps non nul) ;
+    liste vide si absente."""
+    t_raw = details.get("time_s") or []
+    xs = details.get(key)
+    if not xs:
+        return []
+    xs = (list(xs) + [None] * len(t_raw))[: len(t_raw)]
+    return [xs[i] for i in range(len(t_raw)) if t_raw[i] is not None]
 
 
 def downsample(details: dict[str, Any], resolution_s: int) -> dict[str, Any]:

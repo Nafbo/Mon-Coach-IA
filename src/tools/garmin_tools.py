@@ -18,6 +18,10 @@ from src.workout_builder import build_workout
 logger = logging.getLogger(__name__)
 
 CACHE_FRESHNESS = timedelta(hours=1)
+# Type de cache des séries d'activité. Suffixe de version : les séries mises en cache avant
+# l'ajout de `power_w` / `cadence_rpm` (type "activity_details") sont relues une fois chez
+# Garmin ; une activité terminée ne change plus, le cache reste sans expiration.
+_DETAILS_CACHE_TYPE = "activity_details_v2"
 
 
 def _get_cached(
@@ -497,10 +501,10 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         """Séries de l'activité (cache sans expiration : une activité passée ne change plus).
         Lève l'exception Garmin telle quelle, à mapper par l'appelant."""
         key = str(activity_id)
-        cached = _get_cached(conn, "activity_details", key, ignore_freshness=True)
+        cached = _get_cached(conn, _DETAILS_CACHE_TYPE, key, ignore_freshness=True)
         if cached is None:
             cached = client.get_activity_details(activity_id)
-            _store_cache(conn, "activity_details", key, cached)
+            _store_cache(conn, _DETAILS_CACHE_TYPE, key, cached)
         return cached
 
     def _activity_summary(activity_id: str) -> dict[str, Any] | None:
@@ -531,6 +535,11 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         Garmin est indisponible). Pour le **vélo**, série supplémentaire `speed_kmh` (vitesse
         en km/h, même échantillonnage) : c'est elle qu'il faut lire ; `pace_min_per_km` est
         conservée pour compatibilité mais n'a pas de sens à vélo.
+
+        `power_w` (W) et `cadence_rpm` (tr/min), même échantillonnage et même `resolution_s` :
+        présentes seulement si l'activité en contient (capteur de puissance, home trainer,
+        sortie MyWhoosh importée) ; absentes sinon, jamais une série de 0. Sur un home
+        trainer, `speed_kmh` est une vitesse virtuelle : l'intensité se lit en puissance.
 
         `resolution_s` (optionnel) : sous-échantillonne à 1 point par tranche de N secondes
         (médiane), ex. 5 -> ~5x moins de tokens. Sans ce paramètre : séries complètes
@@ -569,6 +578,8 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
         type: str = "auto",
         pause_merge_s: float | None = None,
         vitesse_cible_kmh: float | None = None,
+        ftp_w: float | None = None,
+        puissance_cible_w: float | None = None,
     ) -> dict[str, Any]:
         """Analyse chiffrée d'une activité (course ou vélo) calculée côté serveur, sans
         renvoyer les séries brutes. Le sport est déduit du type Garmin de l'activité (champ
@@ -623,6 +634,31 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
           moitié > 2 × l'autre ET écart ≥ 50 m, le minimum évitant les faux positifs sur
           terrain plat) ; fenêtre couvrant moins des 2/3 (66,7 %) du temps en mouvement.
 
+        **Vélo AVEC puissance** (capteur, home trainer, sortie MyWhoosh importée : série
+        `power_w`) — sur home trainer la vitesse est virtuelle, l'intensité se lit en watts :
+        - entrées optionnelles `ftp_w` (FTP en W, jamais devinée : sans elle, ni % FTP, ni IF,
+          ni TSS, ni zones de puissance, et `vue_ensemble.message_ftp` le dit) et
+          `puissance_cible_w` (puissance prévue des blocs) ;
+        - `vue_ensemble` en plus : `puissance_moy_w`, `puissance_normalisee_w` (NP, moyenne
+          glissante 30 s), `vi`, `puissance_max_w`, `cadence_moy_rpm`, `travail_kj`,
+          `ftp_utilisee_w`, `if`, `tss`, `puissance_moy_pct_ftp`, `fc_disponible`
+          (+ `message_fc` si la FC est absente : un 0 Garmin est une absence) ;
+        - `zones_puissance` (avec `ftp_w`) : % du temps en mouvement par zone, Z1 <= 55 %,
+          Z2 56-75, Z3 76-90, Z4 91-105, Z5 106-120, Z6 121-150, Z7 > 150 % FTP ;
+        - `meilleurs_efforts_w` : `1min`, `5min`, `10min`, `20min` (null si plus court) ;
+        - blocs détectés sur la PUISSANCE lissée (± 15 s), pas sur la vitesse
+          (`type_applique.base_detection` = "puissance") ; chaque bloc ajoute
+          `puissance_moy_w`, `puissance_max_w`, `pct_ftp`, `cadence_moy_rpm` et, avec
+          `puissance_cible_w`, `ecart_cible_w`, `ecart_cible_pct`, `verdict_puissance`
+          (<= 5 % conforme, <= 10 % derive, au-delà hors cible) ;
+        - `derive_cardiaque` = découplage **Pw:FC** (puissance / FC, 1re vs 2e moitié du plus
+          long effort continu >= 40 min), mêmes champs et même fusion des pauses que ci-dessus ;
+          `moities` donne `puissance_moy_w`, `fc_moy`, `rapport_w_par_bpm`. Non fiable si
+          |découplage| > 10 %, puissance moyenne différente de plus de 15 % entre les moitiés,
+          ou couverture < 2/3 (pas de règle de dénivelé : le relief n'affecte pas la mesure en
+          watts). Null avec `derive_cardiaque_raison` (FC absente, effort < 40 min…) ;
+        - `puissance_disponible` : true. Sans puissance : sortie vélo historique inchangée.
+
         Course : sortie historique inchangée, plus `distance_officielle_km` dans
         `vue_ensemble` quand le résumé Garmin est disponible.
 
@@ -652,6 +688,10 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
             return _error(f"pause_merge_s invalide : {pause_merge_s}")
         if vitesse_cible_kmh is not None and vitesse_cible_kmh <= 0:
             return _error(f"vitesse_cible_kmh invalide : {vitesse_cible_kmh}")
+        if ftp_w is not None and not 50 <= ftp_w <= 600:
+            return _error(f"ftp_w invalide : {ftp_w} (attendu entre 50 et 600 W)")
+        if puissance_cible_w is not None and not 20 <= puissance_cible_w <= 2000:
+            return _error(f"puissance_cible_w invalide : {puissance_cible_w}")
         try:
             details = _activity_details(activity_id)
         except Exception as exc:
@@ -666,6 +706,8 @@ def build_garmin_tools(client: GarminClient, conn: sqlite3.Connection) -> dict[s
             summary=summary,
             pause_merge_s=pause_merge_s,
             vitesse_cible_kmh=vitesse_cible_kmh,
+            ftp_w=ftp_w,
+            puissance_cible_w=puissance_cible_w,
         )
         return {"activity_id": str(activity_id), **result}
 

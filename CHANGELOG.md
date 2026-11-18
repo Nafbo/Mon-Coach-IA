@@ -4,6 +4,34 @@ Toutes les évolutions sont **additives** : aucune clé de réponse existante n'
 retirée (vérifié par `tests/test_non_regression.py`, schémas figés le 17/10/2026), sauf
 l'exception signalée au 17/10/2026 (matin) pour `garmin_get_training_status`.
 
+## 2026-11-19 — Analyse vélo en puissance (home trainer, MyWhoosh)
+
+### Ajouté (additif : aucun champ existant renommé ni retiré)
+- `garmin_get_activity_details` : séries `power_w` et `cadence_rpm` quand l'activité en
+  contient (jamais de série de 0), même échantillonnage et même `resolution_s`. Cache des
+  séries versionné (`activity_details_v2`) : les entrées mises en cache avant la puissance
+  sont relues une fois, toujours sans expiration ensuite.
+- `garmin_analyse_activity`, vélo avec puissance : paramètres `ftp_w`, `puissance_cible_w` ;
+  `vue_ensemble` + `puissance_moy_w`, `puissance_normalisee_w`, `vi`, `puissance_max_w`,
+  `cadence_moy_rpm`, `travail_kj`, `ftp_utilisee_w`, `if`, `tss`, `puissance_moy_pct_ftp`,
+  `message_ftp` (sans FTP), `fc_disponible`, `message_fc` (FC absente),
+  `vitesse_virtuelle_possible` ; `zones_puissance` (Z1-Z7), `meilleurs_efforts_w`,
+  `puissance_disponible`, `derive_cardiaque_raison` ; blocs détectés sur la puissance
+  (`type_applique.base_detection`, `puissance_bimodale`, `centre_effort_w`,
+  `centre_recup_w`) avec `puissance_moy_w`, `puissance_max_w`, `pct_ftp`, `cadence_moy_rpm`,
+  `ecart_cible_w`, `ecart_cible_pct`, `verdict_puissance` ; `derive_cardiaque` en Pw:FC.
+- `mywhoosh_get_ftp` : `activity_id`, `puissance_moyenne_test_w`, `duree_test_s`.
+- `mywhoosh_merge_hr` : `ressenti_original` (lu avant toute suppression) et
+  `copie_ressenti` (écriture sur l'activité fusionnée, vérifiée par relecture).
+  Logique de suppression inchangée.
+
+### Vérifié sur le compte réel
+- Ramp Test 25124678915 : 138 W moy., NP 177 W (Garmin : 137 / 177), meilleure minute
+  277 W ; `mywhoosh_get_ftp` = 208 W, `activity_id` 25124678915.
+- Tour de Corse 25124112994 (sans FC) : NP 191 W (Garmin 191), FC absente signalée.
+- Trois sorties route sans puissance : sortie strictement identique à la version précédente.
+- Non vérifié en réel : la copie du ressenti (aucune activité montre avec ressenti à fusionner).
+
 ## 2026-11-18 (nuit) — FTP vélo dans `garmin_get_lactate_threshold`
 
 ### Corrigé

@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from src.fit_device import FitFormatError, _parse, best_mean_power, heart_rate_series, power_series, inject_heart_rate, rewrite_as_edge_840, summarize
-from src.garmin_client import ACTIVITY_TYPE_MAP, GarminClient
+from src.garmin_client import ACTIVITY_TYPE_MAP, GarminClient, classify_error
 from src.models import PARIS_TZ
 from src.mywhoosh_client import MyWhooshClient, MyWhooshError
 from src.mywhoosh_workout import SPORT_BIKE, WorkoutError, build_workout
@@ -192,6 +192,28 @@ def build_mywhoosh_tools(
         failed = all(r["statut"] == "erreur" for r in results)
         return {"status": "error" if failed else "ok", "dry_run": dry_run, "sorties": results}
 
+    def _read_feedback(activity_id: int) -> dict[str, Any]:
+        try:
+            fb = garmin.get_activity_feedback(activity_id)
+        except Exception as exc:
+            return {"status": "error", "error_type": classify_error(exc), "message": _garmin_error(exc)["message"]}
+        return {k: fb.get(k) for k in ("status", "sensations", "sensations_brut", "effort_percu_sur_10", "effort_percu_libelle")}
+
+    def _copy_feedback(feedback: dict[str, Any], new_id: int | None) -> dict[str, Any]:
+        if feedback.get("status") != "ok":
+            return {"statut": "rien_a_copier"}
+        if new_id is None:
+            return {"statut": "activite_introuvable"}
+        feel = feedback.get("sensations_brut")
+        effort = feedback.get("effort_percu_sur_10")
+        try:
+            garmin.set_activity_feedback(new_id, feel=feel, rpe=effort * 10 if effort else None)
+            check = garmin.get_activity_feedback(new_id)
+        except Exception as exc:
+            return {"statut": "echec", "message": _garmin_error(exc)["message"]}
+        same = check.get("sensations_brut") == feel and check.get("effort_percu_sur_10") == effort
+        return {"statut": "copie" if same else "non_persiste"}
+
     async def mywhoosh_merge_hr(garmin_activity_id: int, delete_original: bool = False) -> dict[str, Any]:
         """Fusionne une séance enregistrée en double : la FC de l'activité montre
         `garmin_activity_id` (ex. « Vélo d'intérieur ») est injectée dans le FIT de la sortie
@@ -200,7 +222,12 @@ def build_mywhoosh_tools(
         d'entraînement avec puissance ET FC. `delete_original=true` supprime ensuite
         DÉFINITIVEMENT l'activité montre (sinon la séance compte deux fois dans la charge) :
         ne le passer qu'après accord explicite de l'utilisateur. Sortie : `activity_id` de
-        la nouvelle activité, `records_avec_fc` / `records_total`, `original_supprime`."""
+        la nouvelle activité, `records_avec_fc` / `records_total`, `original_supprime`,
+        `ressenti_original` (sensations et effort perçu de l'activité montre, lus avant toute
+        suppression : `status` "ok" | "no_data" | "error") et `copie_ressenti` : "copie"
+        (recopié et relu sur la nouvelle activité), "non_persiste" (Garmin a accepté l'écriture
+        mais ne l'a pas gardée), "echec" (+ `message`), "rien_a_copier" ou
+        "activite_introuvable" (id de la nouvelle activité inconnu)."""
         if mywhoosh is None:
             return _error(
                 "MyWhoosh non configuré : renseigner MYWHOOSH_EMAIL et MYWHOOSH_PASSWORD dans le .env",
@@ -254,8 +281,12 @@ def build_mywhoosh_tools(
             **_upload(merged, r_start, r_end, exclude_id=garmin_activity_id),
             "original_supprime": False,
         }
+        # Ressenti saisi sur la montre : lu AVANT toute suppression (il disparaîtrait avec
+        # l'activité montre), renvoyé, puis recopié sur l'activité fusionnée si possible.
+        result["ressenti_original"] = _read_feedback(garmin_activity_id)
         if result["statut"] != "importe":
             return {"status": "error", **result}
+        result["copie_ressenti"] = _copy_feedback(result["ressenti_original"], result.get("activity_id"))
         if delete_original:
             try:
                 garmin.delete_activity(garmin_activity_id)
@@ -312,7 +343,9 @@ def build_mywhoosh_tools(
         constaté avec la valeur de l'app : quelques watts (208 calculés pour 206 affichés le
         18/11/2026). Ne voit ni une FTP modifiée à la main dans l'app, ni un autre type de
         test. `scan` : nombre de sorties récentes parcourues (1 à 10). Sortie : `status`
-        "ok" (+ `ftp_watts`, `meilleure_minute_w`, `test` {nom, date}, `methode`) |
+        "ok" (+ `ftp_watts`, `meilleure_minute_w`, `test` {nom, date}, `methode`,
+        `activity_id` Garmin du test — null s'il n'est pas importé —,
+        `puissance_moyenne_test_w`, `duree_test_s`) |
         "no_data" (aucun Ramp Test parmi les sorties parcourues) | "error"."""
         if mywhoosh is None:
             return _error(
@@ -330,14 +363,31 @@ def build_mywhoosh_tools(
             return {"status": "no_data", "message": f"aucun Ramp Test parmi les {len(rides)} dernières sorties"}
         try:
             fit = mywhoosh.download_fit(test)
-            best = best_mean_power(power_series(fit), 60)
-            start = summarize(fit).start_utc
+            series = power_series(fit)
+            best = best_mean_power(series, 60)
+            fit_summary = summarize(fit)
+            start = fit_summary.start_utc
         except MyWhooshError as exc:
             return _error(f"MyWhoosh : {exc}", exc.error_type)
         except FitFormatError as exc:
             return _error(f"FIT du Ramp Test illisible : {exc}", "unknown")
         if not best:
             return {"status": "no_data", "message": "pas de puissance exploitable dans le FIT du Ramp Test"}
+        duration = fit_summary.elapsed_s or len(series)
+        activity_id = None
+        if start is not None:
+            # Activité Garmin du test (import mywhoosh_sync ou fusion), retrouvée par l'heure ;
+            # null si le test n'a pas été importé ou si Garmin ne répond pas (jamais bloquant).
+            day = start.astimezone(PARIS_TZ).date()
+            try:
+                found = find_overlapping(
+                    garmin.get_activities_by_date(day - timedelta(days=1), day + timedelta(days=1)),
+                    start,
+                    start + timedelta(seconds=duration),
+                )
+                activity_id = found["activity_id"] if found else None
+            except Exception as exc:
+                logger.info("activité Garmin du Ramp Test introuvable : %s", exc)
         return {
             "status": "ok",
             "ftp_watts": round(best * _RAMP_FTP_RATIO),
@@ -347,6 +397,9 @@ def build_mywhoosh_tools(
                 "date": start.astimezone(PARIS_TZ).date().isoformat() if start else None,
             },
             "methode": "75 % de la meilleure minute du Ramp Test (estimation, ± quelques W vs l'app)",
+            "activity_id": activity_id,
+            "puissance_moyenne_test_w": round(sum(series) / len(series)) if series else None,
+            "duree_test_s": round(duration),
         }
 
     return {

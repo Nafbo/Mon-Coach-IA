@@ -732,6 +732,9 @@ class GarminClient:
         # Distance cumulée mesurée par Garmin (m) : plus fiable que l'intégration de l'allure
         # pour l'analyse (P2). Absente des payloads mis en cache avant son ajout.
         distance_idx = _index_for("sumDistance")
+        # Puissance et cadence vélo (capteur, home trainer ou FIT MyWhoosh importé).
+        power_idx = _index_for("directPower")
+        cadence_idx = _index_for("directBikeCadence")
 
         def _value_at(metrics: list[Any] | None, idx: int | None) -> Any:
             return metrics[idx] if metrics is not None and idx is not None and idx < len(metrics) else None
@@ -741,6 +744,8 @@ class GarminClient:
         pace_min_per_km: list[float | None] = []
         elevation_m: list[float | None] = []
         distance_m: list[float | None] = []
+        power_w: list[int | None] = []
+        cadence_rpm: list[int | None] = []
         for point in points:
             metrics = point.get("metrics") if isinstance(point, dict) else None
             metrics = metrics if isinstance(metrics, list) else None
@@ -749,14 +754,23 @@ class GarminClient:
             pace_min_per_km.append(_pace_min_per_km(_value_at(metrics, speed_idx)))
             elevation_m.append(_round_or_none(_value_at(metrics, elevation_idx)))
             distance_m.append(_round_or_none(_value_at(metrics, distance_idx)))
+            power_w.append(_to_int(_value_at(metrics, power_idx), default=None))
+            cadence_rpm.append(_to_int(_value_at(metrics, cadence_idx), default=None))
 
-        return {
+        result: dict[str, Any] = {
             "time_s": time_s,
             "heart_rate_bpm": heart_rate_bpm,
             "pace_min_per_km": pace_min_per_km,
             "elevation_m": elevation_m,
             "distance_m": distance_m,
         }
+        # Séries ajoutées seulement si elles portent une vraie valeur : jamais de série
+        # de 0 ou de null (pas de capteur, sortie sans puissance).
+        if any(v for v in power_w):
+            result["power_w"] = power_w
+        if any(v for v in cadence_rpm):
+            result["cadence_rpm"] = cadence_rpm
+        return result
 
     def get_swim_splits(self, activity_id: str | int) -> list[dict[str, Any]]:
         """Longueurs de piscine d'une activité de nage (`get_activity_details` ne contient
@@ -843,6 +857,17 @@ class GarminClient:
             if not names:
                 raise GarminUnavailableError("archive Garmin sans fichier .fit", error_type="unknown")
             return zf.read(names[0])
+
+    def set_activity_feedback(self, activity_id: int | str, *, feel: int | None, rpe: int | None) -> Any:
+        """Écrit sensations (`directWorkoutFeel`, 0/25/50/75/100) et effort perçu
+        (`directWorkoutRpe`, 10 à 100) d'une activité. Pas de méthode dédiée dans
+        garminconnect : même requête que `set_activity_name` (PUT de l'activité) avec les deux
+        champs du `summaryDTO` lus par `get_activity_feedback`. Non documenté par Garmin :
+        l'appelant relit l'activité pour vérifier que la valeur est gardée."""
+        summary = {k: v for k, v in (("directWorkoutFeel", feel), ("directWorkoutRpe", rpe)) if v is not None}
+        payload = {"activityId": int(activity_id), "summaryDTO": summary}
+        url = f"{self._garmin.garmin_connect_activity}/{activity_id}"
+        return self._call(self._garmin.client.put, "connectapi", url, json=payload, api=True)
 
     def delete_activity(self, activity_id: int | str) -> Any:
         """Supprime définitivement une activité réalisée (irréversible côté Garmin)."""

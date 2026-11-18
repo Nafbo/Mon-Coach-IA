@@ -410,3 +410,56 @@ async def test_get_ftp_without_ramp_test_is_no_data(garmin: MagicMock, mywhoosh:
     result = await build_mywhoosh_tools(garmin, mywhoosh)["mywhoosh_get_ftp"]()
     assert result["status"] == "no_data"
     mywhoosh.download_fit.assert_not_called()
+
+
+# -- ressenti conservé par la fusion ---------------------------------------------------
+
+_FEEDBACK = {"status": "ok", "sensations": "Fort", "sensations_brut": 75, "effort_percu_sur_10": 7, "effort_percu_libelle": "Difficile"}
+
+
+async def test_merge_reads_feedback_before_delete_and_copies_it(garmin: MagicMock, mywhoosh: MagicMock) -> None:
+    mywhoosh.download_fit.return_value = make_ride_fit()
+    garmin.download_activity_fit.return_value = make_watch_fit()
+    garmin.upload_activity_file.return_value = {"detailedImportResult": {"successes": [{"internalId": 7}]}}
+    calls: list[str] = []
+    garmin.get_activity_feedback.side_effect = lambda aid: calls.append(f"lire {aid}") or _FEEDBACK
+    garmin.set_activity_feedback.side_effect = lambda aid, **kw: calls.append(f"ecrire {aid} {kw}")
+    garmin.delete_activity.side_effect = lambda aid: calls.append(f"supprimer {aid}")
+
+    result = await build_mywhoosh_tools(garmin, mywhoosh)["mywhoosh_merge_hr"](garmin_activity_id=42, delete_original=True)
+
+    assert result["ressenti_original"]["effort_percu_sur_10"] == 7
+    assert result["copie_ressenti"] == {"statut": "copie"} and result["original_supprime"] is True
+    assert calls == ["lire 42", "ecrire 7 {'feel': 75, 'rpe': 70}", "lire 7", "supprimer 42"]
+
+
+async def test_merge_feedback_not_persisted_or_absent(garmin: MagicMock, mywhoosh: MagicMock) -> None:
+    mywhoosh.download_fit.return_value = make_ride_fit()
+    garmin.download_activity_fit.return_value = make_watch_fit()
+    garmin.upload_activity_file.return_value = {"detailedImportResult": {"successes": [{"internalId": 7}]}}
+    tool = build_mywhoosh_tools(garmin, mywhoosh)["mywhoosh_merge_hr"]
+
+    garmin.get_activity_feedback.side_effect = [_FEEDBACK, {"status": "no_data", "sensations_brut": None, "effort_percu_sur_10": None}]
+    lost = await tool(garmin_activity_id=42)
+    assert lost["copie_ressenti"] == {"statut": "non_persiste"}
+
+    garmin.get_activity_feedback.side_effect = None
+    garmin.get_activity_feedback.return_value = {"status": "no_data"}
+    garmin.set_activity_feedback.reset_mock()
+    none = await tool(garmin_activity_id=42)
+    assert none["ressenti_original"]["status"] == "no_data" and none["copie_ressenti"] == {"statut": "rien_a_copier"}
+    garmin.set_activity_feedback.assert_not_called()
+    garmin.delete_activity.assert_not_called()
+
+
+async def test_get_ftp_reports_garmin_activity_mean_power_and_duration(garmin: MagicMock, mywhoosh: MagicMock) -> None:
+    mywhoosh.list_activities.return_value = [{"title": "MyWhoosh - Ramp Test - MyWhoosh", "activityFileId": "b"}]
+    mywhoosh.download_fit.return_value = make_ride_fit(seconds=120)
+    garmin.get_activities_by_date.return_value = [_garmin_act(START, 2, "virtual_ride")]
+
+    result = await build_mywhoosh_tools(garmin, mywhoosh)["mywhoosh_get_ftp"]()
+
+    assert result["ftp_watts"] == 180 and result["meilleure_minute_w"] == 240  # champs historiques
+    assert result["activity_id"] == 42
+    assert result["puissance_moyenne_test_w"] == 210  # moyenne de 150 à 269 W
+    assert result["duree_test_s"] == 120

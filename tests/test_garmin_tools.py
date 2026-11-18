@@ -897,7 +897,7 @@ async def test_activity_details_cache_ignores_freshness_window(
     stale_time = (datetime.now(PARIS_TZ) - timedelta(hours=5)).isoformat()
     conn.execute(
         "INSERT INTO garmin_cache (date, type, payload_json, fetched_at) VALUES (?, ?, ?, ?)",
-        ("999", "activity_details", '{"time_s": [0]}', stale_time),
+        ("999", "activity_details_v2", '{"time_s": [0]}', stale_time),
     )
     conn.commit()
 
@@ -905,6 +905,24 @@ async def test_activity_details_cache_ignores_freshness_window(
 
     assert result == {"status": "ok", "elapsed_s": 0, "moving_s": 0, "pauses": [], "time_s": [0], "sport": None}
     fake_client.get_activity_details.assert_not_called()
+
+
+async def test_activity_details_cached_before_power_series_are_refetched_once(
+    tools: dict, fake_client: MagicMock, conn: sqlite3.Connection
+) -> None:
+    # Cache de l'ancien format (sans power_w) : relu une seule fois chez Garmin.
+    conn.execute(
+        "INSERT INTO garmin_cache (date, type, payload_json, fetched_at) VALUES (?, ?, ?, ?)",
+        ("998", "activity_details", '{"time_s": [0]}', datetime.now(PARIS_TZ).isoformat()),
+    )
+    conn.commit()
+    fake_client.get_activity_details.return_value = {"time_s": [0, 1], "power_w": [150, 160]}
+
+    first = await tools["garmin_get_activity_details"]("998")
+    second = await tools["garmin_get_activity_details"]("998")
+
+    assert first["power_w"] == [150, 160] and second == first
+    fake_client.get_activity_details.assert_called_once_with("998")
 
 
 async def test_activity_details_error_handling(tools: dict, fake_client: MagicMock) -> None:
